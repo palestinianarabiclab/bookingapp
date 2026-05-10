@@ -50,10 +50,15 @@ const state = {
     currentUser: null,
     currentRole: "",
     studentProfile: null,
+    studentBilling: {
+        balance: 0,
+        lessonPrice: 0,
+    },
     studentAuthMode: "login",
     teacherUser: null,
     teacherRole: "",
     bookingCache: new Map(),
+    studentDirectory: new Map(),
     googleCalendarMessage: "",
     busyRefreshTimer: null,
     busyRefreshInFlight: null,
@@ -93,6 +98,8 @@ function cacheDom() {
         "studentAuthForm",
         "studentAuthHint",
         "studentAuthBadge",
+        "studentBillingHint",
+        "studentBalanceSummary",
         "studentLoginModeBtn",
         "studentSignupModeBtn",
         "studentNameField",
@@ -158,6 +165,9 @@ function cacheDom() {
         "teacherBookingList",
         "refreshBookingsBtn",
         "clearBookingsBtn",
+        "teacherStudentMsg",
+        "teacherStudentList",
+        "refreshStudentsBtn",
         "googleCalendarStatus",
         "googleConnectBtn",
         "googleDisconnectBtn",
@@ -178,6 +188,24 @@ function escapeHtml(value) {
         '"': "&quot;",
         "'": "&#39;",
     }[char]));
+}
+
+function normalizeMoney(value) {
+    const amount = Number(value || 0);
+    if (!Number.isFinite(amount)) return 0;
+    return Math.max(0, Math.round(amount * 100) / 100);
+}
+
+function formatMoney(value) {
+    return `$${normalizeMoney(value).toFixed(2)}`;
+}
+
+function getStudentLessonPrice(data = {}) {
+    return normalizeMoney(data.lessonPrice ?? data.billing?.lessonPrice ?? 0);
+}
+
+function getStudentBalance(data = {}) {
+    return normalizeMoney(data.balance ?? data.billing?.balance ?? 0);
 }
 
 function isLocalDevHost() {
@@ -400,6 +428,154 @@ function getStudentPhone() {
     return (state.studentProfile?.phone || "").trim();
 }
 
+function updateStudentBillingUi() {
+    const signedIn = isStudentSignedIn();
+    const balance = getStudentBalance(state.studentBilling);
+    const lessonPrice = getStudentLessonPrice(state.studentBilling);
+    if (els.studentBillingHint) {
+        if (!signedIn) {
+            els.studentBillingHint.textContent = "Sign in to see your balance and lesson price.";
+        } else if (!lessonPrice) {
+            els.studentBillingHint.textContent = "Ask the teacher to set your lesson price before booking.";
+        } else {
+            els.studentBillingHint.textContent = balance >= lessonPrice
+                ? "Your balance is ready for booking."
+                : "Your balance is below the lesson price.";
+        }
+    }
+    if (els.studentBalanceSummary) {
+        els.studentBalanceSummary.innerHTML = `
+            <div>
+                <span>Balance</span>
+                <strong>${formatMoney(balance)}</strong>
+            </div>
+            <div>
+                <span>Lesson Price</span>
+                <strong>${formatMoney(lessonPrice)}</strong>
+            </div>
+        `;
+    }
+}
+
+async function refreshStudentBilling() {
+    if (!isStudentSignedIn()) {
+        state.studentBilling = { balance: 0, lessonPrice: 0 };
+        updateStudentBillingUi();
+        return state.studentBilling;
+    }
+    const snap = await window.db.collection("users").doc(state.currentUser.uid).get();
+    const data = snap.data() || {};
+    state.studentProfile = data;
+    state.studentBilling = {
+        balance: getStudentBalance(data),
+        lessonPrice: getStudentLessonPrice(data),
+    };
+    updateStudentAuthUi();
+    updateStudentBillingUi();
+    return state.studentBilling;
+}
+
+async function getStudentBillingForBooking(studentUid) {
+    const snap = await window.db.collection("users").doc(studentUid).get();
+    const data = snap.data() || {};
+    const balance = getStudentBalance(data);
+    const lessonPrice = getStudentLessonPrice(data);
+    if (!lessonPrice) {
+        throw new Error("The teacher has not set your lesson price yet.");
+    }
+    if (balance < lessonPrice) {
+        throw new Error(`Your balance is ${formatMoney(balance)}. You need ${formatMoney(lessonPrice)} to book this lesson.`);
+    }
+    return { balance, lessonPrice };
+}
+
+async function commitBookingWithBilling({
+    bookingRef,
+    bookingData,
+    publicBookingData,
+    billing,
+}) {
+    const userRef = window.db.collection("users").doc(bookingData.studentUid);
+    const publicRef = window.db.collection("publicBookings").doc(bookingRef.id);
+    const lessonPrice = normalizeMoney(billing?.lessonPrice);
+    const transactionId = `charge-${bookingRef.id}`;
+    await window.db.runTransaction(async (transaction) => {
+        const userSnap = await transaction.get(userRef);
+        const userData = userSnap.data() || {};
+        const balance = getStudentBalance(userData);
+        const currentLessonPrice = getStudentLessonPrice(userData);
+        if (!currentLessonPrice) {
+            throw new Error("The teacher has not set your lesson price yet.");
+        }
+        if (balance < currentLessonPrice) {
+            throw new Error(`Your balance is ${formatMoney(balance)}. You need ${formatMoney(currentLessonPrice)} to book this lesson.`);
+        }
+        transaction.set(bookingRef, {
+            ...bookingData,
+            lessonPrice: currentLessonPrice,
+            balanceCharged: currentLessonPrice,
+            billingTransactionId: transactionId,
+        });
+        transaction.set(publicRef, publicBookingData);
+        transaction.update(userRef, {
+            balance: normalizeMoney(balance - currentLessonPrice),
+            updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
+            billingTransactions: window.firebase.firestore.FieldValue.arrayUnion({
+                id: transactionId,
+                at: Date.now(),
+                type: "lesson-charge",
+                bookingId: bookingRef.id,
+                amount: currentLessonPrice,
+                balanceBefore: balance,
+                balanceAfter: normalizeMoney(balance - currentLessonPrice),
+            }),
+        });
+    });
+    await refreshStudentBilling();
+    return { charged: lessonPrice };
+}
+
+async function refundBookingCharge({ bookingId, booking, reason }) {
+    const studentUid = booking?.studentUid || "";
+    const amount = normalizeMoney(booking?.balanceCharged || booking?.lessonPrice || 0);
+    if (!studentUid || !amount || booking?.balanceRefunded) return false;
+    const userRef = window.db.collection("users").doc(studentUid);
+    const bookingRef = window.db.collection("bookings").doc(bookingId);
+    const transactionId = `refund-${bookingId}`;
+    await window.db.runTransaction(async (transaction) => {
+        const [userSnap, bookingSnap] = await Promise.all([
+            transaction.get(userRef),
+            transaction.get(bookingRef),
+        ]);
+        const latestBooking = bookingSnap.data() || {};
+        if (latestBooking.balanceRefunded) return;
+        const refundAmount = normalizeMoney(latestBooking.balanceCharged || latestBooking.lessonPrice || amount);
+        if (!refundAmount) return;
+        const userData = userSnap.data() || {};
+        const balance = getStudentBalance(userData);
+        transaction.update(userRef, {
+            balance: normalizeMoney(balance + refundAmount),
+            updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
+            billingTransactions: window.firebase.firestore.FieldValue.arrayUnion({
+                id: transactionId,
+                at: Date.now(),
+                type: "lesson-refund",
+                bookingId,
+                amount: refundAmount,
+                reason,
+                balanceBefore: balance,
+                balanceAfter: normalizeMoney(balance + refundAmount),
+            }),
+        });
+        transaction.update(bookingRef, {
+            balanceRefunded: refundAmount,
+            refundedAt: Date.now(),
+            refundReason: reason,
+        });
+    });
+    return true;
+}
+
 function updateBookingSubmitState() {
     if (!els.bookingSubmit) return;
     els.bookingSubmit.disabled = !state.selectedSlotMs || !isStudentSignedIn();
@@ -450,6 +626,7 @@ function updateStudentAuthUi() {
     if (els.studentLogoutBtn) {
         els.studentLogoutBtn.hidden = !signedIn;
     }
+    updateStudentBillingUi();
     updateBookingSubmitState();
 }
 
@@ -793,9 +970,12 @@ async function loadStudentBookings() {
         els.bookingStatusList.innerHTML = rows.slice(0, 10).map((b) => {
             const status = (b.status || "booked").toLowerCase();
             const label = status === "canceled" ? "Canceled" : status === "rescheduled" ? "Rescheduled" : "Booked";
-            const canChange = status !== "canceled" && Number(b.slot || 0) - Date.now() >= STUDENT_CHANGE_CUTOFF_MS;
-            const cutoffNote = status !== "canceled" && !canChange
-                ? "<div class=\"small-note\">Changes close 12 hours before the lesson.</div>"
+            const slotMs = Number(b.slot || 0);
+            const timeUntilLesson = slotMs - Date.now();
+            const canCancel = status !== "canceled" && timeUntilLesson > 0;
+            const canReschedule = status !== "canceled" && timeUntilLesson >= STUDENT_CHANGE_CUTOFF_MS;
+            const cutoffNote = status !== "canceled" && canCancel && !canReschedule
+                ? "<div class=\"small-note\">Rescheduling closes 12 hours before the lesson. You can still cancel.</div>"
                 : "";
             return `
                 <div class="booking-status-item" data-student-booking-id="${escapeHtml(b.id)}">
@@ -803,8 +983,8 @@ async function loadStudentBookings() {
                     <div>Status: ${escapeHtml(label)}</div>
                     ${cutoffNote}
                     <div class="booking-item__actions">
-                        <button class="btn btn--ghost btn--small" data-student-action="cancel" ${canChange ? "" : "disabled"}>Cancel</button>
-                        <button class="btn btn--outline btn--small" data-student-action="reschedule" ${canChange ? "" : "disabled"}>Reschedule</button>
+                        <button class="btn btn--ghost btn--small" data-student-action="cancel" ${canCancel ? "" : "disabled"}>Cancel</button>
+                        <button class="btn btn--outline btn--small" data-student-action="reschedule" ${canReschedule ? "" : "disabled"}>Reschedule</button>
                     </div>
                     <div class="booking-item__resched"></div>
                 </div>
@@ -820,8 +1000,9 @@ async function cancelStudentBooking(bookingId) {
     const snap = await window.db.collection("bookings").doc(bookingId).get();
     const booking = snap.data() || {};
     if (booking.studentUid !== state.currentUser?.uid) throw new Error("This booking does not belong to your account.");
-    if (Number(booking.slot || 0) - Date.now() < STUDENT_CHANGE_CUTOFF_MS) {
-        throw new Error("You cannot cancel less than 12 hours before the lesson.");
+    const timeUntilLesson = Number(booking.slot || 0) - Date.now();
+    if (timeUntilLesson <= 0) {
+        throw new Error("You cannot cancel a lesson that has already started.");
     }
     if ((booking.googleCalendarEventId || bookingId) && typeof window.deleteBookingViaAppsScript === "function") {
         const result = await window.deleteBookingViaAppsScript({
@@ -841,6 +1022,9 @@ async function cancelStudentBooking(bookingId) {
             throw new Error(normalizeAppsScriptStudentError(result, "Could not remove this booking from Google Calendar."));
         }
     }
+    const refunded = timeUntilLesson >= STUDENT_CHANGE_CUTOFF_MS
+        ? await refundBookingCharge({ bookingId, booking, reason: "student-early-cancel" })
+        : false;
     await window.db.collection("bookings").doc(bookingId).set({
         status: "canceled",
         updatedAt: Date.now(),
@@ -857,6 +1041,8 @@ async function cancelStudentBooking(bookingId) {
         updatedAt: Date.now(),
         calendarSynced: false,
     }, { merge: true });
+    await refreshStudentBilling();
+    return { refunded };
 }
 
 async function openStudentReschedulePanel(itemEl, bookingId) {
@@ -1054,6 +1240,9 @@ function wireStudentActions() {
                     name,
                     phone,
                     role: "student",
+                    balance: 0,
+                    lessonPrice: 0,
+                    billingTransactions: [],
                     createdAt: window.firebase.firestore.FieldValue.serverTimestamp(),
                     updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
                 });
@@ -1128,8 +1317,12 @@ function wireStudentActions() {
                 return;
             }
             if (action === "cancel") {
-                await cancelStudentBooking(bookingId);
-                setStatus(els.bookingStatusMsg, "Booking canceled.", "success");
+                const result = await cancelStudentBooking(bookingId);
+                setStatus(
+                    els.bookingStatusMsg,
+                    result?.refunded ? "Booking canceled and the lesson price was returned to your balance." : "Booking canceled. Late cancellations keep the lesson charge.",
+                    "success"
+                );
                 await loadStudentBookings();
                 await renderBookingCalendar();
                 return;
@@ -1250,6 +1443,8 @@ function wireStudentActions() {
             hashEmail,
             sendBookingEmail,
             createBookingViaAppsScript: window.createBookingViaAppsScript,
+            getStudentBillingForBooking,
+            commitBookingWithBilling,
             loadBookingStatus,
             isLocalDevHost,
         });
@@ -1366,6 +1561,7 @@ async function refreshTeacherDashboard() {
     window.bookingSettings = state.bookingSettings;
     await refreshRuntimeBusyBlocks();
     syncTeacherFormFields();
+    await refreshTeacherStudents();
     await refreshTeacherBookings();
     await refreshGoogleCalendarStatus();
     await renderBookingCalendar();
@@ -1379,6 +1575,77 @@ async function refreshTeacherBookings() {
         escapeHtml,
         formatSlotTime,
     });
+}
+
+function renderTeacherStudents(students) {
+    if (!els.teacherStudentList) return;
+    state.studentDirectory.clear();
+    if (!students.length) {
+        els.teacherStudentList.innerHTML = "<div class=\"small-note\">No student accounts yet.</div>";
+        return;
+    }
+    els.teacherStudentList.innerHTML = students.map((student) => {
+        state.studentDirectory.set(student.id, student);
+        const balance = getStudentBalance(student);
+        const lessonPrice = getStudentLessonPrice(student);
+        const name = student.name || "Student";
+        const email = student.email || "";
+        const phone = student.phone || "";
+        return `
+            <div class="student-admin-item" data-student-id="${escapeHtml(student.id)}">
+                <div class="student-admin-item__head">
+                    <div>
+                        <div class="student-admin-item__name">${escapeHtml(name)}</div>
+                        <div class="student-admin-item__meta">${escapeHtml(email)}${phone ? " | " + escapeHtml(phone) : ""}</div>
+                    </div>
+                    <div class="booking-item__status">${formatMoney(balance)}</div>
+                </div>
+                <div class="inline-fields">
+                    <label class="field">
+                        <span>Balance</span>
+                        <input type="number" min="0" step="0.01" data-student-balance value="${balance}" />
+                    </label>
+                    <label class="field">
+                        <span>Lesson Price</span>
+                        <input type="number" min="0" step="0.01" data-student-price value="${lessonPrice}" />
+                    </label>
+                    <label class="field">
+                        <span>&nbsp;</span>
+                        <button type="button" class="btn btn--primary" data-student-admin-action="save-billing">Save</button>
+                    </label>
+                </div>
+            </div>
+        `;
+    }).join("");
+}
+
+async function refreshTeacherStudents() {
+    if (!state.teacherUser || state.teacherRole !== "teacher") return;
+    if (els.teacherStudentList) {
+        els.teacherStudentList.innerHTML = "<div class=\"small-note\">Loading students...</div>";
+    }
+    const snap = await window.db.collection("users").where("role", "==", "student").get();
+    const students = [];
+    snap.forEach((doc) => students.push({ id: doc.id, ...(doc.data() || {}) }));
+    students.sort((a, b) => String(a.name || a.email || "").localeCompare(String(b.name || b.email || "")));
+    renderTeacherStudents(students);
+}
+
+async function saveStudentBilling(studentId, balance, lessonPrice) {
+    const normalizedBalance = normalizeMoney(balance);
+    const normalizedLessonPrice = normalizeMoney(lessonPrice);
+    await window.db.collection("users").doc(studentId).set({
+        balance: normalizedBalance,
+        lessonPrice: normalizedLessonPrice,
+        updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
+        billingTransactions: window.firebase.firestore.FieldValue.arrayUnion({
+            at: Date.now(),
+            by: "teacher",
+            type: "manual-update",
+            balance: normalizedBalance,
+            lessonPrice: normalizedLessonPrice,
+        }),
+    }, { merge: true });
 }
 
 function updateEmailQuotaUi(result) {
@@ -1615,6 +1882,33 @@ function wireTeacherActions() {
         }
     });
 
+    els.refreshStudentsBtn?.addEventListener("click", (event) => {
+        withButtonLoading(event.currentTarget, "Refreshing...", () => refreshTeacherStudents()).catch((error) => {
+            setStatus(els.teacherStudentMsg, error.message || "Could not load students.", "error");
+        });
+    });
+
+    els.teacherStudentList?.addEventListener("click", async (event) => {
+        const button = event.target.closest("[data-student-admin-action]");
+        if (!button) return;
+        const item = button.closest("[data-student-id]");
+        const studentId = item?.dataset.studentId || "";
+        if (!studentId) return;
+        const action = button.dataset.studentAdminAction;
+        if (action !== "save-billing") return;
+        try {
+            await withButtonLoading(button, "Saving...", async () => {
+                const balance = item.querySelector("[data-student-balance]")?.value || "0";
+                const lessonPrice = item.querySelector("[data-student-price]")?.value || "0";
+                await saveStudentBilling(studentId, balance, lessonPrice);
+                await refreshTeacherStudents();
+            });
+            setStatus(els.teacherStudentMsg, "Student billing saved.", "success");
+        } catch (error) {
+            setStatus(els.teacherStudentMsg, error.message || "Could not save student billing.", "error");
+        }
+    });
+
     els.teacherBookingList?.addEventListener("click", async (event) => {
         const button = event.target.closest("[data-action]");
         if (!button) return;
@@ -1639,6 +1933,7 @@ function wireTeacherActions() {
                 if (deleteResult?.success === false && !isAlreadyDeletedCalendarEvent(deleteResult)) {
                     throw new Error(normalizeAppsScriptStudentError(deleteResult, "Could not remove this booking from Google Calendar."));
                 }
+                await refundBookingCharge({ bookingId, booking, reason: "teacher-cancel" });
                 await cancelBooking({ db: window.db, firebase: window.firebase, bookingId });
                 setStatus(els.teacherBookingMsg, "Booking canceled.", "success");
                 await refreshTeacherBookings();
@@ -1776,6 +2071,7 @@ async function handleAuthState(user) {
     state.currentUser = user || null;
     state.currentRole = "";
     state.studentProfile = null;
+    state.studentBilling = { balance: 0, lessonPrice: 0 };
     state.teacherUser = null;
     state.teacherRole = "";
     state.publicSettingsLoaded = false;
@@ -1790,6 +2086,7 @@ async function handleAuthState(user) {
         setStatus(els.teacherAuthMsg, "Sign in to access teacher controls.");
         setStatus(els.teacherLoginMsg, "");
         updateStudentAuthUi();
+        updateStudentBillingUi();
         showScreen("welcome-screen");
         return;
     }
@@ -1803,6 +2100,10 @@ async function handleAuthState(user) {
     });
     state.currentRole = resolved.role || "student";
     state.studentProfile = resolved.data || {};
+    state.studentBilling = {
+        balance: getStudentBalance(resolved.data || {}),
+        lessonPrice: getStudentLessonPrice(resolved.data || {}),
+    };
 
     if (state.currentRole !== "teacher") {
         if (els.teacherDashboard) els.teacherDashboard.hidden = true;
@@ -1810,8 +2111,10 @@ async function handleAuthState(user) {
         setStatus(els.teacherAuthMsg, "Sign in to access teacher controls.");
         setStatus(els.teacherLoginMsg, "");
         updateStudentAuthUi();
+        updateStudentBillingUi();
         showScreen("student-screen");
         await Promise.all([
+            refreshStudentBilling(),
             loadStudentBookings(),
             ensureBookingCalendarLoaded(),
         ]);

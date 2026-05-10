@@ -6,7 +6,7 @@
     <title>Lesson Booking Studio</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; script-src 'self' 'unsafe-inline' https://www.google.com https://www.gstatic.com https://apis.google.com https://accounts.google.com https://cdn.jsdelivr.net; script-src-elem 'self' 'unsafe-inline' https://www.google.com https://www.gstatic.com https://apis.google.com https://accounts.google.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self' https://www.google.com https://firestore.googleapis.com https://securetoken.googleapis.com https://identitytoolkit.googleapis.com https://www.googleapis.com https://apis.google.com https://www.gstatic.com https://cdn.jsdelivr.net https://content.googleapis.com https://script.google.com https://script.googleusercontent.com https://api.emailjs.com; frame-src https://www.google.com https://www.gstatic.com https://content.googleapis.com https://jafferapp.firebaseapp.com; child-src https://www.google.com https://www.gstatic.com https://content.googleapis.com https://jafferapp.firebaseapp.com; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests" />
+        content="default-src 'self'; script-src 'self' 'unsafe-inline' https://www.google.com https://www.gstatic.com https://apis.google.com https://accounts.google.com https://cdn.jsdelivr.net; script-src-elem 'self' 'unsafe-inline' https://www.google.com https://www.gstatic.com https://apis.google.com https://accounts.google.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self' https://www.google.com https://firestore.googleapis.com https://securetoken.googleapis.com https://identitytoolkit.googleapis.com https://www.googleapis.com https://apis.google.com https://www.gstatic.com https://cdn.jsdelivr.net https://content.googleapis.com https://script.google.com https://script.googleusercontent.com https://api.emailjs.com; frame-src https://www.google.com https://www.gstatic.com https://content.googleapis.com https://farouqapp-7ea93.firebaseapp.com; child-src https://www.google.com https://www.gstatic.com https://content.googleapis.com https://farouqapp-7ea93.firebaseapp.com; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests" />
     <link rel="stylesheet" href="styles.css" />
     <link rel="icon"
         href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230f172a'/%3E%3Ctext x='32' y='41' font-size='26' text-anchor='middle' fill='%23f8fafc' font-family='Arial, sans-serif'%3ELS%3C/text%3E%3C/svg%3E" />
@@ -77,6 +77,25 @@
                 </article>
 
                 <div class="student-stack">
+                    <article class="panel panel--billing">
+                        <div class="panel__head">
+                            <div>
+                                <h3>Lesson Balance</h3>
+                                <p class="small-note" id="studentBillingHint">Sign in to see your balance and lesson price.</p>
+                            </div>
+                        </div>
+                        <div id="studentBalanceSummary" class="billing-summary">
+                            <div>
+                                <span>Balance</span>
+                                <strong>$0.00</strong>
+                            </div>
+                            <div>
+                                <span>Lesson Price</span>
+                                <strong>$0.00</strong>
+                            </div>
+                        </div>
+                    </article>
+
                     <article class="panel panel--form">
                         <div class="panel__head">
                             <div>
@@ -284,6 +303,20 @@
                         <button id="savePreplyBtn" type="button" class="btn btn--outline">Save Preply Calendar ID</button>
                         <button id="googleTestPreplyBtn" type="button" class="btn btn--ghost">Test Preply Calendar</button>
                     </div>
+                </section>
+
+                <section class="teacher-editor__section">
+                    <div class="panel__head">
+                        <div>
+                            <h4>Students & Balances</h4>
+                            <p class="teacher-edit-note">
+                                Set each student's balance and private lesson price.
+                            </p>
+                        </div>
+                        <button id="refreshStudentsBtn" type="button" class="btn btn--outline btn--small">Refresh</button>
+                    </div>
+                    <p id="teacherStudentMsg" class="status-line"></p>
+                    <div id="teacherStudentList" class="student-admin-list"></div>
                 </section>
 
                 <section class="teacher-editor__section">

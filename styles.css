@@ -317,7 +317,8 @@ main.site-shell {
 }
 
 .panel--form,
-.panel--support {
+.panel--support,
+.panel--billing {
     background:
         linear-gradient(180deg, rgba(255, 253, 249, 0.98), rgba(250, 243, 234, 0.96));
 }
@@ -606,7 +607,8 @@ main.site-shell {
 
 .status-list,
 .exception-list,
-.booking-panel {
+.booking-panel,
+.student-admin-list {
     display: grid;
     gap: 12px;
 }
@@ -637,6 +639,32 @@ main.site-shell {
     font-size: 1.25rem;
 }
 
+.billing-summary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.billing-summary > div {
+    border: 1px solid rgba(15, 118, 110, 0.14);
+    border-radius: 18px;
+    padding: 14px;
+    background: rgba(255, 255, 255, 0.72);
+}
+
+.billing-summary span {
+    display: block;
+    color: var(--muted);
+    font-size: 0.88rem;
+}
+
+.billing-summary strong {
+    display: block;
+    margin-top: 4px;
+    color: var(--primary-dark);
+    font-size: 1.35rem;
+}
+
 .contact-card {
     border: 1px solid rgba(91, 100, 113, 0.14);
     border-radius: 22px;
@@ -656,7 +684,8 @@ main.site-shell {
 
 .booking-status-item,
 .exception-item,
-.booking-item {
+.booking-item,
+.student-admin-item {
     border: 1px solid rgba(91, 100, 113, 0.16);
     border-radius: 18px;
     padding: 16px;
@@ -664,9 +693,25 @@ main.site-shell {
 }
 
 .exception-item,
-.booking-item {
+.booking-item,
+.student-admin-item {
     display: grid;
     gap: 10px;
+}
+
+.student-admin-item__head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.student-admin-item__name {
+    font-weight: 700;
+}
+
+.student-admin-item__meta {
+    color: var(--muted);
 }
 
 .booking-item__actions,

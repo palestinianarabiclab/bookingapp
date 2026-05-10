@@ -66,6 +66,8 @@ export async function submitGuestBooking({
     hashEmail,
     sendBookingEmail,
     createBookingViaAppsScript,
+    getStudentBillingForBooking,
+    commitBookingWithBilling,
     loadBookingStatus,
     isLocalDevHost,
 }) {
@@ -155,6 +157,8 @@ export async function submitGuestBooking({
             return;
         }
 
+        const studentBilling = await getStudentBillingForBooking?.(studentUid);
+
         const tzLabel = bookingSettings.timezone || getLocalTimezone() || "Local time";
         const combinedNotes = [
             notes,
@@ -205,7 +209,7 @@ export async function submitGuestBooking({
             appsScriptMessage = appsScriptSync?.message || "";
         }
 
-        await bookingRef.set({
+        const bookingData = {
             name,
             email,
             phone,
@@ -233,10 +237,10 @@ export async function submitGuestBooking({
                     by: "student",
                 },
             ],
-        });
+        };
 
         const emailHash = await hashEmail(email);
-        await db.collection("publicBookings").doc(bookingRef.id).set({
+        const publicBookingData = {
             slot: selectedSlot,
             status: "booked",
             emailHash,
@@ -245,7 +249,19 @@ export async function submitGuestBooking({
             updatedAt: Date.now(),
             calendarSynced,
             source: "student",
-        });
+        };
+
+        if (commitBookingWithBilling) {
+            await commitBookingWithBilling({
+                bookingRef,
+                bookingData,
+                publicBookingData,
+                billing: studentBilling,
+            });
+        } else {
+            await bookingRef.set(bookingData);
+            await db.collection("publicBookings").doc(bookingRef.id).set(publicBookingData);
+        }
 
         const emailSummary = [
             `Student: ${name}`,
