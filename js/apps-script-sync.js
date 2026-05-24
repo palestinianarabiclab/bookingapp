@@ -169,6 +169,18 @@ async function getAppsScriptEmailQuota() {
     return callAppsScript("getEmailQuota", {}, { allowGet: true });
 }
 
+async function installLessonReminderTrigger() {
+    return callAppsScript("installReminderTrigger", {}, { allowGet: true });
+}
+
+async function sendLessonReminderCheck() {
+    return callAppsScript("sendReminderCheck", {}, { allowGet: true });
+}
+
+async function reconcileBalancesViaAppsScript() {
+    return callAppsScript("reconcileBalances", {}, { allowGet: true });
+}
+
 async function createBookingViaAppsScript(payload) {
     return callAppsScript("createBooking", payload);
 }
@@ -238,6 +250,9 @@ window.saveAppsScriptSettings = saveAppsScriptSettings;
 window.testAppsScriptConnection = testAppsScriptConnection;
 window.fetchBusyBlocksFromAppsScript = fetchBusyBlocksFromAppsScript;
 window.getAppsScriptEmailQuota = getAppsScriptEmailQuota;
+window.installLessonReminderTrigger = installLessonReminderTrigger;
+window.sendLessonReminderCheck = sendLessonReminderCheck;
+window.reconcileBalancesViaAppsScript = reconcileBalancesViaAppsScript;
 window.createBookingViaAppsScript = createBookingViaAppsScript;
 window.deleteBookingViaAppsScript = deleteBookingViaAppsScript;
 window.syncPendingBookingsViaAppsScript = syncPendingBookingsViaAppsScript;

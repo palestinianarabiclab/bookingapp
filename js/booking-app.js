@@ -15,7 +15,6 @@ import {
 } from "./logic/guestBookingFlow.js";
 import {
     renderTeacherBookings,
-    openReschedulePanel,
     cancelBooking,
     rescheduleBooking,
     clearAllBookings,
@@ -50,17 +49,15 @@ const state = {
     currentUser: null,
     currentRole: "",
     studentProfile: null,
-    studentBilling: {
-        balance: 0,
-        lessonPrice: 0,
-    },
     studentAuthMode: "login",
     teacherUser: null,
     teacherRole: "",
     bookingCache: new Map(),
-    studentDirectory: new Map(),
+    studentCache: new Map(),
     googleCalendarMessage: "",
     busyRefreshTimer: null,
+    balanceReconcileTimer: null,
+    studentProfileUnsubscribe: null,
     busyRefreshInFlight: null,
     googleCalendarModuleLoading: null,
     publicSettingsLoaded: false,
@@ -71,6 +68,14 @@ const state = {
     busyBlocksRangeDays: 0,
     busySyncReady: false,
     busySyncMessage: "",
+    rescheduleModal: {
+        role: "",
+        bookingId: "",
+        booking: null,
+        weekOffset: 0,
+        selectedSlot: 0,
+        allowCustom: false,
+    },
 };
 
 const els = {};
@@ -82,6 +87,8 @@ function qs(id) {
 function cacheDom() {
     [
         "bookingTimezoneLabel",
+        "appLoadingOverlay",
+        "appLoadingText",
         "bookingWeekPrev",
         "bookingWeekNext",
         "bookingWeekLabel",
@@ -91,6 +98,9 @@ function cacheDom() {
         "selectedTimeDisplay",
         "bookingForm",
         "bookingAccountSummary",
+        "studentBalanceCard",
+        "studentBalanceValue",
+        "studentLessonPriceValue",
         "bookingWebsite",
         "bookingSubmit",
         "bookingMsg",
@@ -98,8 +108,6 @@ function cacheDom() {
         "studentAuthForm",
         "studentAuthHint",
         "studentAuthBadge",
-        "studentBillingHint",
-        "studentBalanceSummary",
         "studentLoginModeBtn",
         "studentSignupModeBtn",
         "studentNameField",
@@ -110,6 +118,7 @@ function cacheDom() {
         "studentEmail",
         "studentPassword",
         "studentAuthSubmit",
+        "studentForgotPasswordBtn",
         "studentLogoutBtn",
         "studentAuthMsg",
         "bookingStatusEmail",
@@ -120,6 +129,17 @@ function cacheDom() {
         "contactEmailBtn",
         "bookingSuccessModal",
         "bookingSuccessText",
+        "rescheduleModal",
+        "rescheduleModalHint",
+        "rescheduleWeekPrev",
+        "rescheduleWeekNext",
+        "rescheduleWeekLabel",
+        "rescheduleGrid",
+        "rescheduleCustomFields",
+        "rescheduleCustomDate",
+        "rescheduleCustomTime",
+        "rescheduleMsg",
+        "rescheduleConfirmBtn",
         "openStudentGateBtn",
         "openTeacherGateBtn",
         "teacherLoginModal",
@@ -127,6 +147,7 @@ function cacheDom() {
         "teacherEmail",
         "teacherPassword",
         "teacherLoginSubmit",
+        "teacherForgotPasswordBtn",
         "teacherLoginMsg",
         "teacherLogoutBtn",
         "teacherAuthBadge",
@@ -149,6 +170,9 @@ function cacheDom() {
         "appsScriptTestBtn",
         "appsScriptRefreshBusyBtn",
         "appsScriptQuotaBtn",
+        "appsScriptInstallReminderBtn",
+        "appsScriptReminderCheckBtn",
+        "appsScriptBalanceCheckBtn",
         "appsScriptEmailQuota",
         "appsScriptEmailQuotaValue",
         "exceptionForm",
@@ -163,11 +187,12 @@ function cacheDom() {
         "clearExceptionsBtn",
         "teacherBookingMsg",
         "teacherBookingList",
+        "teacherStudentsMsg",
+        "teacherStudentsList",
+        "refreshStudentsBtn",
+        "reconcileBalancesBtn",
         "refreshBookingsBtn",
         "clearBookingsBtn",
-        "teacherStudentMsg",
-        "teacherStudentList",
-        "refreshStudentsBtn",
         "googleCalendarStatus",
         "googleConnectBtn",
         "googleDisconnectBtn",
@@ -188,24 +213,6 @@ function escapeHtml(value) {
         '"': "&quot;",
         "'": "&#39;",
     }[char]));
-}
-
-function normalizeMoney(value) {
-    const amount = Number(value || 0);
-    if (!Number.isFinite(amount)) return 0;
-    return Math.max(0, Math.round(amount * 100) / 100);
-}
-
-function formatMoney(value) {
-    return `$${normalizeMoney(value).toFixed(2)}`;
-}
-
-function getStudentLessonPrice(data = {}) {
-    return normalizeMoney(data.lessonPrice ?? data.billing?.lessonPrice ?? 0);
-}
-
-function getStudentBalance(data = {}) {
-    return normalizeMoney(data.balance ?? data.billing?.balance ?? 0);
 }
 
 function isLocalDevHost() {
@@ -293,10 +300,42 @@ function setStatus(element, message, tone = "") {
     if (tone === "success") element.classList.add("is-success");
 }
 
+let appLoadingCount = 0;
+
+function setAppLoading(loading, message = "Loading...") {
+    if (!els.appLoadingOverlay) return;
+    appLoadingCount = Math.max(0, appLoadingCount + (loading ? 1 : -1));
+    if (loading && els.appLoadingText) {
+        els.appLoadingText.textContent = message || "Loading...";
+    }
+    const isActive = appLoadingCount > 0;
+    els.appLoadingOverlay.classList.toggle("is-active", isActive);
+    els.appLoadingOverlay.setAttribute("aria-hidden", isActive ? "false" : "true");
+}
+
+function waitForLoadingPaint() {
+    return new Promise((resolve) => {
+        window.requestAnimationFrame(() => window.requestAnimationFrame(resolve));
+    });
+}
+
+async function withAppLoading(message, task) {
+    try {
+        setAppLoading(true, message);
+        await waitForLoadingPaint();
+        return await task();
+    } finally {
+        setAppLoading(false);
+    }
+}
+
 function setButtonLoading(button, loading, loadingText = "") {
     if (!button) return;
     const label = button.querySelector(".btn__label");
     if (loading) {
+        if (!button.dataset.loadingWasDisabled) {
+            button.dataset.loadingWasDisabled = button.disabled ? "true" : "false";
+        }
         button.dataset.idleLabel = label?.textContent || button.textContent || "";
         if (label && loadingText) label.textContent = loadingText;
         if (!label && loadingText) {
@@ -314,17 +353,20 @@ function setButtonLoading(button, loading, loadingText = "") {
     }
     if (label) label.textContent = button.dataset.idleLabel || label.textContent;
     if (!label && button.dataset.idleLabel) button.textContent = button.dataset.idleLabel;
-    button.disabled = false;
+    button.disabled = button.dataset.loadingWasDisabled === "true";
+    delete button.dataset.loadingWasDisabled;
     button.classList.remove("is-loading");
 }
 
 async function withButtonLoading(button, loadingText, task) {
-    try {
-        setButtonLoading(button, true, loadingText);
-        return await task();
-    } finally {
-        setButtonLoading(button, false);
-    }
+    return withAppLoading(loadingText || "Loading...", async () => {
+        try {
+            setButtonLoading(button, true, loadingText);
+            return await task();
+        } finally {
+            setButtonLoading(button, false);
+        }
+    });
 }
 
 function normalizeAppsScriptStudentError(result, fallbackMessage) {
@@ -400,6 +442,26 @@ function formatDateKey(dateKey, options = {}) {
     });
 }
 
+function getCustomTeacherSlotMs(item) {
+    const date = item.querySelector(".booking-resched-date")?.value || "";
+    const time = item.querySelector(".booking-resched-time")?.value || "";
+    if (!date || !time) return 0;
+    const [year, month, day] = date.split("-").map(Number);
+    const [hour, minute] = time.split(":").map(Number);
+    if (!year || !month || !day || !Number.isFinite(hour) || !Number.isFinite(minute)) return 0;
+    return zonedDateTimeToUtcMs(getTeacherTimezone(), year, month, day, hour, minute);
+}
+
+function getModalCustomSlotMs() {
+    const date = els.rescheduleCustomDate?.value || "";
+    const time = els.rescheduleCustomTime?.value || "";
+    if (!date || !time) return 0;
+    const [year, month, day] = date.split("-").map(Number);
+    const [hour, minute] = time.split(":").map(Number);
+    if (!year || !month || !day || !Number.isFinite(hour) || !Number.isFinite(minute)) return 0;
+    return zonedDateTimeToUtcMs(getTeacherTimezone(), year, month, day, hour, minute);
+}
+
 function hashEmail(email) {
     const normalized = String(email || "").trim().toLowerCase();
     const encoder = new TextEncoder();
@@ -428,152 +490,57 @@ function getStudentPhone() {
     return (state.studentProfile?.phone || "").trim();
 }
 
-function updateStudentBillingUi() {
+function toMoneyValue(value) {
+    const number = Number(value || 0);
+    return Number.isFinite(number) ? number : 0;
+}
+
+function formatMoney(value) {
+    return toMoneyValue(value).toLocaleString([], {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 2,
+    });
+}
+
+function getStudentBalance() {
+    return toMoneyValue(state.studentProfile?.balance);
+}
+
+function getStudentLessonPrice() {
+    return toMoneyValue(state.studentProfile?.lessonPrice);
+}
+
+function updateStudentBalanceUi() {
     const signedIn = isStudentSignedIn();
-    const balance = getStudentBalance(state.studentBilling);
-    const lessonPrice = getStudentLessonPrice(state.studentBilling);
-    if (els.studentBillingHint) {
-        if (!signedIn) {
-            els.studentBillingHint.textContent = "Sign in to see your balance and lesson price.";
-        } else if (!lessonPrice) {
-            els.studentBillingHint.textContent = "Ask the teacher to set your lesson price before booking.";
-        } else {
-            els.studentBillingHint.textContent = balance >= lessonPrice
-                ? "Your balance is ready for booking."
-                : "Your balance is below the lesson price.";
-        }
+    if (els.studentBalanceCard) {
+        els.studentBalanceCard.hidden = !signedIn;
     }
-    if (els.studentBalanceSummary) {
-        els.studentBalanceSummary.innerHTML = `
-            <div>
-                <span>Balance</span>
-                <strong>${formatMoney(balance)}</strong>
-            </div>
-            <div>
-                <span>Lesson Price</span>
-                <strong>${formatMoney(lessonPrice)}</strong>
-            </div>
-        `;
+    if (!signedIn) return;
+    if (els.studentBalanceValue) {
+        els.studentBalanceValue.textContent = formatMoney(getStudentBalance());
+    }
+    if (els.studentLessonPriceValue) {
+        const price = getStudentLessonPrice();
+        els.studentLessonPriceValue.textContent = price ? `Lesson price: ${formatMoney(price)}` : "Lesson price: not set";
     }
 }
 
-async function refreshStudentBilling() {
-    if (!isStudentSignedIn()) {
-        state.studentBilling = { balance: 0, lessonPrice: 0 };
-        updateStudentBillingUi();
-        return state.studentBilling;
+async function sendPasswordResetLink({ emailInput, statusElement, button }) {
+    if (!window.auth || typeof window.auth.sendPasswordResetEmail !== "function") {
+        setStatus(statusElement, "Firebase password reset is not available.", "error");
+        return;
     }
-    const snap = await window.db.collection("users").doc(state.currentUser.uid).get();
-    const data = snap.data() || {};
-    state.studentProfile = data;
-    state.studentBilling = {
-        balance: getStudentBalance(data),
-        lessonPrice: getStudentLessonPrice(data),
-    };
-    updateStudentAuthUi();
-    updateStudentBillingUi();
-    return state.studentBilling;
-}
-
-async function getStudentBillingForBooking(studentUid) {
-    const snap = await window.db.collection("users").doc(studentUid).get();
-    const data = snap.data() || {};
-    const balance = getStudentBalance(data);
-    const lessonPrice = getStudentLessonPrice(data);
-    if (!lessonPrice) {
-        throw new Error("The teacher has not set your lesson price yet.");
+    const email = (emailInput?.value || "").trim().toLowerCase();
+    if (!email) {
+        setStatus(statusElement, "Please enter your email address first.", "error");
+        emailInput?.focus();
+        return;
     }
-    if (balance < lessonPrice) {
-        throw new Error(`Your balance is ${formatMoney(balance)}. You need ${formatMoney(lessonPrice)} to book this lesson.`);
-    }
-    return { balance, lessonPrice };
-}
-
-async function commitBookingWithBilling({
-    bookingRef,
-    bookingData,
-    publicBookingData,
-    billing,
-}) {
-    const userRef = window.db.collection("users").doc(bookingData.studentUid);
-    const publicRef = window.db.collection("publicBookings").doc(bookingRef.id);
-    const lessonPrice = normalizeMoney(billing?.lessonPrice);
-    const transactionId = `charge-${bookingRef.id}`;
-    await window.db.runTransaction(async (transaction) => {
-        const userSnap = await transaction.get(userRef);
-        const userData = userSnap.data() || {};
-        const balance = getStudentBalance(userData);
-        const currentLessonPrice = getStudentLessonPrice(userData);
-        if (!currentLessonPrice) {
-            throw new Error("The teacher has not set your lesson price yet.");
-        }
-        if (balance < currentLessonPrice) {
-            throw new Error(`Your balance is ${formatMoney(balance)}. You need ${formatMoney(currentLessonPrice)} to book this lesson.`);
-        }
-        transaction.set(bookingRef, {
-            ...bookingData,
-            lessonPrice: currentLessonPrice,
-            balanceCharged: currentLessonPrice,
-            billingTransactionId: transactionId,
-        });
-        transaction.set(publicRef, publicBookingData);
-        transaction.update(userRef, {
-            balance: normalizeMoney(balance - currentLessonPrice),
-            updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
-            billingTransactions: window.firebase.firestore.FieldValue.arrayUnion({
-                id: transactionId,
-                at: Date.now(),
-                type: "lesson-charge",
-                bookingId: bookingRef.id,
-                amount: currentLessonPrice,
-                balanceBefore: balance,
-                balanceAfter: normalizeMoney(balance - currentLessonPrice),
-            }),
-        });
+    await withButtonLoading(button, "Sending...", async () => {
+        setStatus(statusElement, "Sending password reset email...");
+        await window.auth.sendPasswordResetEmail(email);
+        setStatus(statusElement, "Password reset email sent. Check your inbox and spam/junk folder.", "success");
     });
-    await refreshStudentBilling();
-    return { charged: lessonPrice };
-}
-
-async function refundBookingCharge({ bookingId, booking, reason }) {
-    const studentUid = booking?.studentUid || "";
-    const amount = normalizeMoney(booking?.balanceCharged || booking?.lessonPrice || 0);
-    if (!studentUid || !amount || booking?.balanceRefunded) return false;
-    const userRef = window.db.collection("users").doc(studentUid);
-    const bookingRef = window.db.collection("bookings").doc(bookingId);
-    const transactionId = `refund-${bookingId}`;
-    await window.db.runTransaction(async (transaction) => {
-        const [userSnap, bookingSnap] = await Promise.all([
-            transaction.get(userRef),
-            transaction.get(bookingRef),
-        ]);
-        const latestBooking = bookingSnap.data() || {};
-        if (latestBooking.balanceRefunded) return;
-        const refundAmount = normalizeMoney(latestBooking.balanceCharged || latestBooking.lessonPrice || amount);
-        if (!refundAmount) return;
-        const userData = userSnap.data() || {};
-        const balance = getStudentBalance(userData);
-        transaction.update(userRef, {
-            balance: normalizeMoney(balance + refundAmount),
-            updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
-            billingTransactions: window.firebase.firestore.FieldValue.arrayUnion({
-                id: transactionId,
-                at: Date.now(),
-                type: "lesson-refund",
-                bookingId,
-                amount: refundAmount,
-                reason,
-                balanceBefore: balance,
-                balanceAfter: normalizeMoney(balance + refundAmount),
-            }),
-        });
-        transaction.update(bookingRef, {
-            balanceRefunded: refundAmount,
-            refundedAt: Date.now(),
-            refundReason: reason,
-        });
-    });
-    return true;
 }
 
 function updateBookingSubmitState() {
@@ -601,6 +568,9 @@ function setStudentAuthMode(mode) {
             els.studentAuthSubmit.textContent = state.studentAuthMode === "signup" ? "Create Account" : "Sign In";
         }
     }
+    if (els.studentForgotPasswordBtn) {
+        els.studentForgotPasswordBtn.hidden = state.studentAuthMode === "signup";
+    }
     els.studentLoginModeBtn?.classList.toggle("btn--primary", state.studentAuthMode === "login");
     els.studentLoginModeBtn?.classList.toggle("btn--outline", state.studentAuthMode !== "login");
     els.studentSignupModeBtn?.classList.toggle("btn--primary", state.studentAuthMode === "signup");
@@ -626,8 +596,30 @@ function updateStudentAuthUi() {
     if (els.studentLogoutBtn) {
         els.studentLogoutBtn.hidden = !signedIn;
     }
-    updateStudentBillingUi();
+    updateStudentBalanceUi();
     updateBookingSubmitState();
+}
+
+function stopStudentProfileListener() {
+    if (typeof state.studentProfileUnsubscribe === "function") {
+        state.studentProfileUnsubscribe();
+    }
+    state.studentProfileUnsubscribe = null;
+}
+
+function startStudentProfileListener() {
+    stopStudentProfileListener();
+    if (!window.db || !state.currentUser || state.currentRole !== "student") return;
+    state.studentProfileUnsubscribe = window.db
+        .collection("users")
+        .doc(state.currentUser.uid)
+        .onSnapshot((snap) => {
+            if (!snap.exists) return;
+            state.studentProfile = snap.data() || {};
+            updateStudentAuthUi();
+        }, (error) => {
+            console.warn("Could not watch student profile.", error);
+        });
 }
 
 function setSelectedSlot(slotMs) {
@@ -671,9 +663,9 @@ function bookingDeps() {
     };
 }
 
-async function refreshRuntimeBusyBlocks({ force = false } = {}) {
-    const daysToFetch = Math.max(8, (state.bookingWeekOffset + 1) * 7 + 1);
-    const requestedDays = Math.min(daysToFetch, 21);
+async function refreshRuntimeBusyBlocks({ force = false, minDays = 0 } = {}) {
+    const daysToFetch = Math.max(8, Number(minDays || 0), (state.bookingWeekOffset + 1) * 7 + 1);
+    const requestedDays = Math.min(daysToFetch, 90);
     if (
         !force
         && state.busySyncReady
@@ -685,15 +677,15 @@ async function refreshRuntimeBusyBlocks({ force = false } = {}) {
     if (state.busyRefreshInFlight) {
         return state.busyRefreshInFlight;
     }
-    state.busyRefreshInFlight = refreshRuntimeBusyBlocksNow({ force }).finally(() => {
+    state.busyRefreshInFlight = refreshRuntimeBusyBlocksNow({ force, minDays }).finally(() => {
         state.busyRefreshInFlight = null;
     });
     return state.busyRefreshInFlight;
 }
 
-async function refreshRuntimeBusyBlocksNow({ force = false } = {}) {
-    const daysToFetch = Math.max(8, (state.bookingWeekOffset + 1) * 7 + 1);
-    const requestedDays = Math.min(daysToFetch, 21);
+async function refreshRuntimeBusyBlocksNow({ force = false, minDays = 0 } = {}) {
+    const daysToFetch = Math.max(8, Number(minDays || 0), (state.bookingWeekOffset + 1) * 7 + 1);
+    const requestedDays = Math.min(daysToFetch, 90);
     if (
         !force
         && state.busySyncReady
@@ -970,12 +962,11 @@ async function loadStudentBookings() {
         els.bookingStatusList.innerHTML = rows.slice(0, 10).map((b) => {
             const status = (b.status || "booked").toLowerCase();
             const label = status === "canceled" ? "Canceled" : status === "rescheduled" ? "Rescheduled" : "Booked";
-            const slotMs = Number(b.slot || 0);
-            const timeUntilLesson = slotMs - Date.now();
-            const canCancel = status !== "canceled" && timeUntilLesson > 0;
-            const canReschedule = status !== "canceled" && timeUntilLesson >= STUDENT_CHANGE_CUTOFF_MS;
-            const cutoffNote = status !== "canceled" && canCancel && !canReschedule
-                ? "<div class=\"small-note\">Rescheduling closes 12 hours before the lesson. You can still cancel.</div>"
+            const canCancel = status !== "canceled";
+            const canReschedule = status !== "canceled" && Number(b.slot || 0) - Date.now() >= STUDENT_CHANGE_CUTOFF_MS;
+            const isLateWindow = status !== "canceled" && Number(b.slot || 0) - Date.now() < STUDENT_CHANGE_CUTOFF_MS;
+            const cutoffNote = isLateWindow
+                ? "<div class=\"small-note\">Rescheduling closes 12 hours before the lesson. Late cancellation may still charge the lesson price.</div>"
                 : "";
             return `
                 <div class="booking-status-item" data-student-booking-id="${escapeHtml(b.id)}">
@@ -1000,10 +991,7 @@ async function cancelStudentBooking(bookingId) {
     const snap = await window.db.collection("bookings").doc(bookingId).get();
     const booking = snap.data() || {};
     if (booking.studentUid !== state.currentUser?.uid) throw new Error("This booking does not belong to your account.");
-    const timeUntilLesson = Number(booking.slot || 0) - Date.now();
-    if (timeUntilLesson <= 0) {
-        throw new Error("You cannot cancel a lesson that has already started.");
-    }
+    const isLateCancel = Number(booking.slot || 0) - Date.now() < STUDENT_CHANGE_CUTOFF_MS;
     if ((booking.googleCalendarEventId || bookingId) && typeof window.deleteBookingViaAppsScript === "function") {
         const result = await window.deleteBookingViaAppsScript({
             eventId: booking.googleCalendarEventId,
@@ -1022,18 +1010,17 @@ async function cancelStudentBooking(bookingId) {
             throw new Error(normalizeAppsScriptStudentError(result, "Could not remove this booking from Google Calendar."));
         }
     }
-    const refunded = timeUntilLesson >= STUDENT_CHANGE_CUTOFF_MS
-        ? await refundBookingCharge({ bookingId, booking, reason: "student-early-cancel" })
-        : false;
     await window.db.collection("bookings").doc(bookingId).set({
         status: "canceled",
         updatedAt: Date.now(),
         calendarSynced: false,
         canceledAt: Date.now(),
+        canceledBy: "student",
         history: window.firebase.firestore.FieldValue.arrayUnion({
             at: Date.now(),
             action: "canceled",
             by: "student",
+            lateChargeApplies: isLateCancel,
         }),
     }, { merge: true });
     await window.db.collection("publicBookings").doc(bookingId).set({
@@ -1041,8 +1028,6 @@ async function cancelStudentBooking(bookingId) {
         updatedAt: Date.now(),
         calendarSynced: false,
     }, { merge: true });
-    await refreshStudentBilling();
-    return { refunded };
 }
 
 async function openStudentReschedulePanel(itemEl, bookingId) {
@@ -1160,6 +1145,154 @@ async function deleteCalendarEventForBooking(bookingId, booking) {
     });
 }
 
+async function rescheduleTeacherBooking(bookingId, booking, newSlot) {
+    const conflict = await findBookingConflict(newSlot, bookingDeps(), { excludeBookingId: bookingId });
+    if (conflict) {
+        throw new Error("That slot is already taken.");
+    }
+    const deleteResult = await deleteCalendarEventForBooking(bookingId, booking);
+    if (deleteResult?.success === false && !isAlreadyDeletedCalendarEvent(deleteResult)) {
+        throw new Error(normalizeAppsScriptStudentError(deleteResult, "Could not remove the old Google Calendar event."));
+    }
+    const createResult = await createCalendarEventForBooking(bookingId, booking, newSlot);
+    if (createResult?.success === false) {
+        throw new Error(createResult.message || "Could not create the new Google Calendar event.");
+    }
+    await rescheduleBooking({
+        db: window.db,
+        firebase: window.firebase,
+        bookingId,
+        booking,
+        newSlot,
+        calendarSynced: !!createResult?.success,
+        googleCalendarEventId: createResult?.eventId || null,
+    });
+}
+
+function resetRescheduleModal() {
+    state.rescheduleModal = {
+        role: "",
+        bookingId: "",
+        booking: null,
+        weekOffset: 0,
+        selectedSlot: 0,
+        allowCustom: false,
+    };
+    if (els.rescheduleGrid) els.rescheduleGrid.innerHTML = "";
+    if (els.rescheduleMsg) setStatus(els.rescheduleMsg, "");
+    if (els.rescheduleCustomDate) els.rescheduleCustomDate.value = "";
+    if (els.rescheduleCustomTime) els.rescheduleCustomTime.value = "";
+}
+
+function closeRescheduleModal() {
+    els.rescheduleModal?.classList.remove("modal--open");
+    resetRescheduleModal();
+}
+
+function setRescheduleSelectedSlot(slotMs) {
+    state.rescheduleModal.selectedSlot = Number(slotMs || 0);
+    document.querySelectorAll("[data-reschedule-slot]").forEach((button) => {
+        button.classList.toggle("is-selected", Number(button.dataset.rescheduleSlot || 0) === state.rescheduleModal.selectedSlot);
+    });
+    if (state.rescheduleModal.selectedSlot) {
+        if (els.rescheduleCustomDate) els.rescheduleCustomDate.value = "";
+        if (els.rescheduleCustomTime) els.rescheduleCustomTime.value = "";
+    }
+}
+
+async function renderRescheduleModalSlots() {
+    if (!els.rescheduleGrid) return;
+    setStatus(els.rescheduleMsg, "");
+    els.rescheduleGrid.innerHTML = "<div class=\"small-note\">Loading available times...</div>";
+    const offset = Math.max(0, state.rescheduleModal.weekOffset || 0);
+    state.rescheduleModal.weekOffset = offset;
+    if (els.rescheduleWeekPrev) els.rescheduleWeekPrev.disabled = offset === 0;
+    const timezone = getDisplayTimezone();
+    const startKey = getScheduleStartDateKey(offset, timezone);
+    const endKey = addDaysToDateKey(startKey, 6);
+    if (els.rescheduleWeekLabel) {
+        els.rescheduleWeekLabel.textContent = `${formatDateKey(startKey, { month: "short", day: "numeric" })} - ${formatDateKey(endKey, { month: "short", day: "numeric" })}`;
+    }
+
+    await refreshRuntimeBusyBlocks({ minDays: (offset + 1) * 7 + 1 });
+    const [startYear, startMonth, startDay] = startKey.split("-").map(Number);
+    const weekEndKey = addDaysToDateKey(startKey, 7);
+    const [endYear, endMonth, endDay] = weekEndKey.split("-").map(Number);
+    const rangeStartMs = zonedDateTimeToUtcMs(timezone, startYear, startMonth, startDay, 0, 0);
+    const rangeEndMs = zonedDateTimeToUtcMs(timezone, endYear, endMonth, endDay, 0, 0);
+    const slots = await getAvailableSlots(7, bookingDeps(), {
+        excludeBookingId: state.rescheduleModal.bookingId,
+        rangeStartMs,
+        rangeEndMs,
+    });
+    const days = Array.from({ length: 7 }, (_, index) => {
+        const dateKey = addDaysToDateKey(startKey, index);
+        return { dateKey, slots: [] };
+    });
+    const dayMap = new Map(days.map((day) => [day.dateKey, day]));
+    slots.forEach((slotDate) => {
+        const dateKey = getDateKey(slotDate, timezone);
+        if (dayMap.has(dateKey)) {
+            dayMap.get(dateKey).slots.push(slotDate);
+        }
+    });
+
+    const html = days.map((day) => {
+        const daySlots = day.slots
+            .sort((a, b) => a.getTime() - b.getTime())
+            .map((slotDate) => {
+                const ts = slotDate.getTime();
+                const label = slotDate.toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    timeZone: timezone,
+                });
+                return `<button type="button" class="slot-btn reschedule-slot-btn" data-reschedule-slot="${ts}">${escapeHtml(label)}</button>`;
+            })
+            .join("");
+        return `
+            <div class="booking-day-column ${daySlots ? "" : "is-empty"}">
+                <div class="booking-day-header">
+                    <div class="booking-day-label">${escapeHtml(formatDateKey(day.dateKey, { weekday: "short" }))}</div>
+                    <div class="booking-day-date">${escapeHtml(formatDateKey(day.dateKey, { month: "short", day: "numeric" }))}</div>
+                </div>
+                <div class="booking-day-slots">
+                    ${daySlots || "<div class=\"booking-day-empty\">No times</div>"}
+                </div>
+            </div>
+        `;
+    }).join("");
+    els.rescheduleGrid.innerHTML = html;
+    setRescheduleSelectedSlot(state.rescheduleModal.selectedSlot);
+}
+
+async function openRescheduleModal({ role, bookingId, booking = null, allowCustom = false }) {
+    if (!bookingId) return;
+    let resolvedBooking = booking;
+    if (!resolvedBooking) {
+        const snap = await window.db.collection("bookings").doc(bookingId).get();
+        resolvedBooking = { id: snap.id, ...(snap.data() || {}) };
+    }
+    state.rescheduleModal = {
+        role,
+        bookingId,
+        booking: resolvedBooking,
+        weekOffset: 0,
+        selectedSlot: 0,
+        allowCustom,
+    };
+    if (els.rescheduleModalHint) {
+        els.rescheduleModalHint.textContent = allowCustom
+            ? "Choose an available time, or enter a custom teacher time."
+            : "Choose an available teacher time.";
+    }
+    if (els.rescheduleCustomFields) {
+        els.rescheduleCustomFields.hidden = !allowCustom;
+    }
+    els.rescheduleModal?.classList.add("modal--open");
+    await renderRescheduleModalSlots();
+}
+
 async function createCalendarEventForBooking(bookingId, booking, slot) {
     if (typeof window.createBookingViaAppsScript !== "function") {
         return { success: false, message: "Apps Script is not available." };
@@ -1184,18 +1317,24 @@ function wireStudentActions() {
         button.addEventListener("click", () => showScreen(button.getAttribute("data-target")));
     });
 
-    els.openStudentGateBtn?.addEventListener("click", () => {
+    els.openStudentGateBtn?.addEventListener("click", (event) => {
         if (isStudentSignedIn()) {
-            showScreen("student-screen");
+            withButtonLoading(event.currentTarget, "Loading...", async () => {
+                showScreen("student-screen");
+                await ensureBookingCalendarLoaded();
+            }).catch(console.error);
             return;
         }
         els.studentAuthModal?.classList.add("modal--open");
         setStatus(els.studentAuthMsg, "");
     });
 
-    els.openTeacherGateBtn?.addEventListener("click", () => {
+    els.openTeacherGateBtn?.addEventListener("click", (event) => {
         if (state.teacherUser && state.teacherRole === "teacher") {
-            showScreen("teacher-screen");
+            withButtonLoading(event.currentTarget, "Loading...", async () => {
+                showScreen("teacher-screen");
+                await refreshTeacherDashboard();
+            }).catch(console.error);
             return;
         }
         els.teacherLoginModal?.classList.add("modal--open");
@@ -1204,6 +1343,18 @@ function wireStudentActions() {
 
     els.studentLoginModeBtn?.addEventListener("click", () => setStudentAuthMode("login"));
     els.studentSignupModeBtn?.addEventListener("click", () => setStudentAuthMode("signup"));
+
+    els.studentForgotPasswordBtn?.addEventListener("click", async (event) => {
+        try {
+            await sendPasswordResetLink({
+                emailInput: els.studentEmail,
+                statusElement: els.studentAuthMsg,
+                button: event.currentTarget,
+            });
+        } catch (error) {
+            setStatus(els.studentAuthMsg, error.message || "Could not send password reset email.", "error");
+        }
+    });
 
     els.studentAuthForm?.addEventListener("submit", async (event) => {
         event.preventDefault();
@@ -1216,6 +1367,7 @@ function wireStudentActions() {
         const name = (els.studentName?.value || "").trim().slice(0, 100);
         const phone = normalizePhoneNumber();
         try {
+            setAppLoading(true, state.studentAuthMode === "signup" ? "Creating account..." : "Signing in...");
             setButtonLoading(
                 els.studentAuthSubmit,
                 true,
@@ -1240,9 +1392,6 @@ function wireStudentActions() {
                     name,
                     phone,
                     role: "student",
-                    balance: 0,
-                    lessonPrice: 0,
-                    billingTransactions: [],
                     createdAt: window.firebase.firestore.FieldValue.serverTimestamp(),
                     updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
                 });
@@ -1258,6 +1407,7 @@ function wireStudentActions() {
         } catch (error) {
             setStatus(els.studentAuthMsg, error.message || "Student sign-in failed.", "error");
         } finally {
+            setAppLoading(false);
             setButtonLoading(els.studentAuthSubmit, false);
         }
     });
@@ -1267,18 +1417,20 @@ function wireStudentActions() {
         await withButtonLoading(els.studentLogoutBtn, "Signing out...", () => window.auth.signOut());
     });
 
-    els.bookingWeekPrev?.addEventListener("click", () => {
-        state.bookingWeekOffset = Math.max(0, state.bookingWeekOffset - 1);
-        refreshRuntimeBusyBlocks()
-            .then(() => renderBookingCalendar())
-            .catch(console.error);
+    els.bookingWeekPrev?.addEventListener("click", (event) => {
+        withButtonLoading(event.currentTarget, "Loading...", async () => {
+            state.bookingWeekOffset = Math.max(0, state.bookingWeekOffset - 1);
+            await refreshRuntimeBusyBlocks();
+            await renderBookingCalendar();
+        }).catch(console.error);
     });
 
-    els.bookingWeekNext?.addEventListener("click", () => {
-        state.bookingWeekOffset += 1;
-        refreshRuntimeBusyBlocks()
-            .then(() => renderBookingCalendar())
-            .catch(console.error);
+    els.bookingWeekNext?.addEventListener("click", (event) => {
+        withButtonLoading(event.currentTarget, "Loading...", async () => {
+            state.bookingWeekOffset += 1;
+            await refreshRuntimeBusyBlocks();
+            await renderBookingCalendar();
+        }).catch(console.error);
     });
 
     els.bookingStatusBtn?.addEventListener("click", (event) => {
@@ -1307,6 +1459,7 @@ function wireStudentActions() {
         const shouldShowLoading = Boolean(loadingTextByAction[action]);
         try {
             if (shouldShowLoading) {
+                setAppLoading(true, loadingTextByAction[action]);
                 setButtonLoading(button, true, loadingTextByAction[action]);
             }
             setStatus(els.bookingStatusMsg, "");
@@ -1317,18 +1470,20 @@ function wireStudentActions() {
                 return;
             }
             if (action === "cancel") {
-                const result = await cancelStudentBooking(bookingId);
-                setStatus(
-                    els.bookingStatusMsg,
-                    result?.refunded ? "Booking canceled and the lesson price was returned to your balance." : "Booking canceled. Late cancellations keep the lesson charge.",
-                    "success"
-                );
+                await cancelStudentBooking(bookingId);
+                setStatus(els.bookingStatusMsg, "Booking canceled.", "success");
                 await loadStudentBookings();
                 await renderBookingCalendar();
                 return;
             }
             if (action === "reschedule") {
-                await openStudentReschedulePanel(item, bookingId);
+                const bookingSnap = await window.db.collection("bookings").doc(bookingId).get();
+                const booking = { id: bookingSnap.id, ...(bookingSnap.data() || {}) };
+                if (booking.studentUid !== state.currentUser?.uid) throw new Error("This booking does not belong to your account.");
+                if (Number(booking.slot || 0) - Date.now() < STUDENT_CHANGE_CUTOFF_MS) {
+                    throw new Error("You cannot reschedule less than 12 hours before the lesson.");
+                }
+                await openRescheduleModal({ role: "student", bookingId, booking, allowCustom: false });
                 return;
             }
             if (action === "confirm-reschedule") {
@@ -1348,8 +1503,79 @@ function wireStudentActions() {
             setStatus(els.bookingStatusMsg, error.message || "Could not update booking.", "error");
         } finally {
             if (shouldShowLoading) {
+                setAppLoading(false);
                 setButtonLoading(button, false);
             }
+        }
+    });
+
+    document.querySelectorAll("[data-close-reschedule-modal]").forEach((button) => {
+        button.addEventListener("click", () => closeRescheduleModal());
+    });
+
+    els.rescheduleWeekPrev?.addEventListener("click", (event) => {
+        withButtonLoading(event.currentTarget, "Loading...", async () => {
+            state.rescheduleModal.weekOffset = Math.max(0, Number(state.rescheduleModal.weekOffset || 0) - 1);
+            await renderRescheduleModalSlots();
+        }).catch((error) => {
+            setStatus(els.rescheduleMsg, error.message || "Could not load available times.", "error");
+        });
+    });
+
+    els.rescheduleWeekNext?.addEventListener("click", (event) => {
+        withButtonLoading(event.currentTarget, "Loading...", async () => {
+            state.rescheduleModal.weekOffset = Number(state.rescheduleModal.weekOffset || 0) + 1;
+            await renderRescheduleModalSlots();
+        }).catch((error) => {
+            setStatus(els.rescheduleMsg, error.message || "Could not load available times.", "error");
+        });
+    });
+
+    els.rescheduleGrid?.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-reschedule-slot]");
+        if (!button) return;
+        setRescheduleSelectedSlot(Number(button.dataset.rescheduleSlot || 0));
+        setStatus(els.rescheduleMsg, "");
+    });
+
+    [els.rescheduleCustomDate, els.rescheduleCustomTime].forEach((input) => {
+        input?.addEventListener("input", () => {
+            if (!state.rescheduleModal.allowCustom) return;
+            state.rescheduleModal.selectedSlot = 0;
+            document.querySelectorAll("[data-reschedule-slot]").forEach((button) => button.classList.remove("is-selected"));
+            setStatus(els.rescheduleMsg, "");
+        });
+    });
+
+    els.rescheduleConfirmBtn?.addEventListener("click", async (event) => {
+        const modalState = state.rescheduleModal;
+        if (!modalState.bookingId || !modalState.booking) return;
+        const customSlot = modalState.allowCustom ? getModalCustomSlotMs() : 0;
+        const newSlot = Number(modalState.selectedSlot || 0) || customSlot;
+        if (!newSlot) {
+            setStatus(els.rescheduleMsg, "Choose an available time first.", "error");
+            return;
+        }
+        if (newSlot <= Date.now()) {
+            setStatus(els.rescheduleMsg, "Choose a future time.", "error");
+            return;
+        }
+        try {
+            await withButtonLoading(event.currentTarget, "Rescheduling...", async () => {
+                if (modalState.role === "student") {
+                    await rescheduleStudentBooking(modalState.bookingId, newSlot);
+                    setStatus(els.bookingStatusMsg, "Booking rescheduled.", "success");
+                    await loadStudentBookings();
+                } else {
+                    await rescheduleTeacherBooking(modalState.bookingId, modalState.booking, newSlot);
+                    setStatus(els.teacherBookingMsg, "Booking rescheduled.", "success");
+                    await refreshTeacherBookings();
+                }
+                await renderBookingCalendar();
+                closeRescheduleModal();
+            });
+        } catch (error) {
+            setStatus(els.rescheduleMsg, error.message || "Could not reschedule booking.", "error");
         }
     });
 
@@ -1401,7 +1627,7 @@ function wireStudentActions() {
         const name = getStudentName();
         const phone = getStudentPhone();
 
-        await submitGuestBooking({
+        await withAppLoading("Confirming booking...", () => submitGuestBooking({
             db: window.db,
             bookingSettings: state.bookingSettings,
             contactSettings: state.contactSettings,
@@ -1443,11 +1669,9 @@ function wireStudentActions() {
             hashEmail,
             sendBookingEmail,
             createBookingViaAppsScript: window.createBookingViaAppsScript,
-            getStudentBillingForBooking,
-            commitBookingWithBilling,
             loadBookingStatus,
             isLocalDevHost,
-        });
+        }));
     });
 }
 
@@ -1561,6 +1785,12 @@ async function refreshTeacherDashboard() {
     window.bookingSettings = state.bookingSettings;
     await refreshRuntimeBusyBlocks();
     syncTeacherFormFields();
+    const balanceResult = await reconcileStudentBalances();
+    if (balanceResult.chargedCount && els.teacherStudentsMsg) {
+        setStatus(els.teacherStudentsMsg, `Deducted ${balanceResult.chargedCount} due lesson charge${balanceResult.chargedCount === 1 ? "" : "s"}.`, "success");
+    } else if (balanceResult.missingPriceCount && els.teacherStudentsMsg) {
+        setStatus(els.teacherStudentsMsg, "Some due lessons were not deducted because lesson price is not set.", "error");
+    }
     await refreshTeacherStudents();
     await refreshTeacherBookings();
     await refreshGoogleCalendarStatus();
@@ -1568,6 +1798,11 @@ async function refreshTeacherDashboard() {
 }
 
 async function refreshTeacherBookings() {
+    const balanceResult = await reconcileStudentBalances();
+    if (balanceResult.chargedCount && els.teacherStudentsMsg) {
+        setStatus(els.teacherStudentsMsg, `Deducted ${balanceResult.chargedCount} due lesson charge${balanceResult.chargedCount === 1 ? "" : "s"}.`, "success");
+        await refreshTeacherStudents();
+    }
     state.bookingCache = await renderTeacherBookings({
         db: window.db,
         teacherBookingList: els.teacherBookingList,
@@ -1577,75 +1812,180 @@ async function refreshTeacherBookings() {
     });
 }
 
-function renderTeacherStudents(students) {
-    if (!els.teacherStudentList) return;
-    state.studentDirectory.clear();
-    if (!students.length) {
-        els.teacherStudentList.innerHTML = "<div class=\"small-note\">No student accounts yet.</div>";
-        return;
-    }
-    els.teacherStudentList.innerHTML = students.map((student) => {
-        state.studentDirectory.set(student.id, student);
-        const balance = getStudentBalance(student);
-        const lessonPrice = getStudentLessonPrice(student);
-        const name = student.name || "Student";
-        const email = student.email || "";
-        const phone = student.phone || "";
-        return `
-            <div class="student-admin-item" data-student-id="${escapeHtml(student.id)}">
-                <div class="student-admin-item__head">
-                    <div>
-                        <div class="student-admin-item__name">${escapeHtml(name)}</div>
-                        <div class="student-admin-item__meta">${escapeHtml(email)}${phone ? " | " + escapeHtml(phone) : ""}</div>
-                    </div>
-                    <div class="booking-item__status">${formatMoney(balance)}</div>
-                </div>
-                <div class="inline-fields">
-                    <label class="field">
-                        <span>Balance</span>
-                        <input type="number" min="0" step="0.01" data-student-balance value="${balance}" />
-                    </label>
-                    <label class="field">
-                        <span>Lesson Price</span>
-                        <input type="number" min="0" step="0.01" data-student-price value="${lessonPrice}" />
-                    </label>
-                    <label class="field">
-                        <span>&nbsp;</span>
-                        <button type="button" class="btn btn--primary" data-student-admin-action="save-billing">Save</button>
-                    </label>
-                </div>
-            </div>
-        `;
-    }).join("");
+function startBalanceReconcileAutoRefresh() {
+    if (state.balanceReconcileTimer) return;
+    state.balanceReconcileTimer = window.setInterval(() => {
+        if (!state.teacherUser || state.teacherRole !== "teacher") return;
+        reconcileStudentBalances()
+            .then(async (result) => {
+                if (!result?.chargedCount) return;
+                setStatus(els.teacherStudentsMsg, `Deducted ${result.chargedCount} due lesson charge${result.chargedCount === 1 ? "" : "s"}.`, "success");
+                await refreshTeacherStudents();
+                await refreshTeacherBookings();
+            })
+            .catch(console.error);
+    }, 60000);
+}
+
+function stopBalanceReconcileAutoRefresh() {
+    if (!state.balanceReconcileTimer) return;
+    window.clearInterval(state.balanceReconcileTimer);
+    state.balanceReconcileTimer = null;
 }
 
 async function refreshTeacherStudents() {
-    if (!state.teacherUser || state.teacherRole !== "teacher") return;
-    if (els.teacherStudentList) {
-        els.teacherStudentList.innerHTML = "<div class=\"small-note\">Loading students...</div>";
+    if (!els.teacherStudentsList) return;
+    els.teacherStudentsList.innerHTML = "<div class=\"small-note\">Loading students...</div>";
+    state.studentCache.clear();
+    try {
+        const snap = await window.db.collection("users").where("role", "==", "student").get();
+        const students = [];
+        snap.forEach((doc) => students.push({ id: doc.id, ...(doc.data() || {}) }));
+        students.sort((a, b) => String(a.name || a.email || "").localeCompare(String(b.name || b.email || "")));
+        if (!students.length) {
+            els.teacherStudentsList.innerHTML = "<div class=\"small-note\">No students yet.</div>";
+            return;
+        }
+        els.teacherStudentsList.innerHTML = students.map((student) => {
+            state.studentCache.set(student.id, student);
+            const balance = formatMoney(student.balance);
+            const lessonPrice = toMoneyValue(student.lessonPrice);
+            return `
+                <div class="student-admin-item" data-student-id="${escapeHtml(student.id)}">
+                    <button class="student-admin-item__summary" type="button" data-student-action="toggle">
+                        <span>
+                            <strong>${escapeHtml(student.name || "Student")}</strong>
+                            <span>${escapeHtml(student.email || "")}</span>
+                        </span>
+                        <span class="student-admin-item__money">Balance: ${balance}</span>
+                    </button>
+                    <form class="student-admin-editor" data-student-editor hidden>
+                        <div class="inline-fields">
+                            <label class="field">
+                                <span>Balance</span>
+                                <input data-student-balance type="number" step="0.01" value="${escapeHtml(toMoneyValue(student.balance))}" />
+                            </label>
+                            <label class="field">
+                                <span>Lesson Price</span>
+                                <input data-student-price type="number" min="0" step="0.01" value="${escapeHtml(lessonPrice)}" />
+                            </label>
+                            <label class="field">
+                                <span>Phone</span>
+                                <input value="${escapeHtml(student.phone || "")}" disabled />
+                            </label>
+                        </div>
+                        <div class="action-row">
+                            <button class="btn btn--primary btn--small" type="submit" data-student-action="save">Save Student</button>
+                        </div>
+                    </form>
+                </div>
+            `;
+        }).join("");
+    } catch (error) {
+        console.error("Could not load students.", error);
+        els.teacherStudentsList.innerHTML = "<div class=\"small-note\">Unable to load students.</div>";
     }
-    const snap = await window.db.collection("users").where("role", "==", "student").get();
-    const students = [];
-    snap.forEach((doc) => students.push({ id: doc.id, ...(doc.data() || {}) }));
-    students.sort((a, b) => String(a.name || a.email || "").localeCompare(String(b.name || b.email || "")));
-    renderTeacherStudents(students);
 }
 
-async function saveStudentBilling(studentId, balance, lessonPrice) {
-    const normalizedBalance = normalizeMoney(balance);
-    const normalizedLessonPrice = normalizeMoney(lessonPrice);
+async function saveStudentFinance(studentId, balance, lessonPrice) {
     await window.db.collection("users").doc(studentId).set({
-        balance: normalizedBalance,
-        lessonPrice: normalizedLessonPrice,
+        balance: toMoneyValue(balance),
+        lessonPrice: toMoneyValue(lessonPrice),
+        financeUpdatedAt: Date.now(),
         updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
-        billingTransactions: window.firebase.firestore.FieldValue.arrayUnion({
-            at: Date.now(),
-            by: "teacher",
-            type: "manual-update",
-            balance: normalizedBalance,
-            lessonPrice: normalizedLessonPrice,
-        }),
     }, { merge: true });
+}
+
+async function loadBalanceChargeCandidates(now) {
+    const docsById = new Map();
+    const addDocs = (snap) => {
+        snap.forEach((doc) => {
+            docsById.set(doc.id, doc);
+        });
+    };
+
+    try {
+        const pastSnap = await window.db
+            .collection("bookings")
+            .where("slot", "<=", now)
+            .orderBy("slot", "desc")
+            .limit(300)
+            .get();
+        addDocs(pastSnap);
+    } catch {
+        const fallbackSnap = await window.db.collection("bookings").limit(500).get();
+        addDocs(fallbackSnap);
+    }
+
+    try {
+        const canceledSnap = await window.db
+            .collection("bookings")
+            .where("status", "==", "canceled")
+            .limit(300)
+            .get();
+        addDocs(canceledSnap);
+    } catch {}
+
+    return Array.from(docsById.values());
+}
+
+async function reconcileStudentBalances() {
+    const now = Date.now();
+    const docs = await loadBalanceChargeCandidates(now);
+    let chargedCount = 0;
+    const studentDocs = new Map();
+    const missingPrice = new Set();
+    for (const doc of docs) {
+        const booking = doc.data() || {};
+        const status = String(booking.status || "booked").toLowerCase();
+        if (!booking.studentUid || booking.balanceChargedAt || booking.balanceCharged) continue;
+        const shouldChargeAttended = Number(booking.slot || 0) <= now && (status === "booked" || status === "rescheduled");
+        const canceledAt = Number(booking.canceledAt || 0);
+        const lateCanceled = status === "canceled" &&
+            String(booking.canceledBy || "student").toLowerCase() === "student" &&
+            canceledAt &&
+            Number(booking.slot || 0) - canceledAt < STUDENT_CHANGE_CUTOFF_MS;
+        if (!shouldChargeAttended && !lateCanceled) continue;
+
+        let studentSnap = studentDocs.get(booking.studentUid);
+        if (!studentSnap) {
+            studentSnap = await window.db.collection("users").doc(booking.studentUid).get();
+            studentDocs.set(booking.studentUid, studentSnap);
+        }
+        const student = studentSnap.exists ? (studentSnap.data() || {}) : {};
+        const lessonPrice = toMoneyValue(booking.lessonPrice || student.lessonPrice);
+        if (!lessonPrice) {
+            missingPrice.add(booking.studentUid);
+            continue;
+        }
+        const chargeReason = lateCanceled ? "late-cancel" : "lesson";
+        const batch = window.db.batch();
+        batch.set(window.db.collection("users").doc(booking.studentUid), {
+            balance: toMoneyValue(student.balance) - lessonPrice,
+            financeUpdatedAt: now,
+            updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        batch.set(window.db.collection("bookings").doc(doc.id), {
+            balanceChargedAt: now,
+            chargedAmount: lessonPrice,
+            chargeReason,
+            updatedAt: now,
+            history: window.firebase.firestore.FieldValue.arrayUnion({
+                at: now,
+                action: "balance-charged",
+                by: "teacher",
+                amount: lessonPrice,
+                reason: chargeReason,
+            }),
+        }, { merge: true });
+        await batch.commit();
+        studentDocs.set(booking.studentUid, {
+            exists: true,
+            data: () => ({ ...student, balance: toMoneyValue(student.balance) - lessonPrice }),
+        });
+        chargedCount += 1;
+    }
+    return { chargedCount, missingPriceCount: missingPrice.size };
 }
 
 function updateEmailQuotaUi(result) {
@@ -1709,6 +2049,18 @@ async function savePreplyCalendarId() {
 }
 
 function wireTeacherActions() {
+    els.teacherForgotPasswordBtn?.addEventListener("click", async (event) => {
+        try {
+            await sendPasswordResetLink({
+                emailInput: els.teacherEmail,
+                statusElement: els.teacherLoginMsg,
+                button: event.currentTarget,
+            });
+        } catch (error) {
+            setStatus(els.teacherLoginMsg, error.message || "Could not send password reset email.", "error");
+        }
+    });
+
     els.teacherLoginForm?.addEventListener("submit", async (event) => {
         event.preventDefault();
         if (!window.auth) {
@@ -1716,6 +2068,7 @@ function wireTeacherActions() {
             return;
         }
         try {
+            setAppLoading(true, "Signing in...");
             setButtonLoading(els.teacherLoginSubmit, true, "Signing in...");
             setStatus(els.teacherLoginMsg, "Signing in...");
             await window.auth.signInWithEmailAndPassword(
@@ -1725,6 +2078,7 @@ function wireTeacherActions() {
         } catch (error) {
             setStatus(els.teacherLoginMsg, error.message || "Sign-in failed.", "error");
         } finally {
+            setAppLoading(false);
             setButtonLoading(els.teacherLoginSubmit, false);
         }
     });
@@ -1824,6 +2178,30 @@ function wireTeacherActions() {
         });
     });
 
+    els.appsScriptInstallReminderBtn?.addEventListener("click", async (event) => {
+        const result = await withButtonLoading(event.currentTarget, "Installing...", () => window.installLessonReminderTrigger?.());
+        setStatus(els.appsScriptMsg, result?.message || "Reminder trigger setup finished.", result?.success ? "success" : "error");
+    });
+
+    els.appsScriptReminderCheckBtn?.addEventListener("click", async (event) => {
+        const result = await withButtonLoading(event.currentTarget, "Checking...", () => window.sendLessonReminderCheck?.());
+        const count = Number(result?.sentCount || 0);
+        const message = result?.message
+            ? `${result.message} Sent ${count} reminder${count === 1 ? "" : "s"}.`
+            : `Sent ${count} reminder${count === 1 ? "" : "s"}.`;
+        setStatus(els.appsScriptMsg, message, result?.success ? "success" : "error");
+    });
+
+    els.appsScriptBalanceCheckBtn?.addEventListener("click", async (event) => {
+        const result = await withButtonLoading(event.currentTarget, "Checking...", () => window.reconcileBalancesViaAppsScript?.());
+        const count = Number(result?.chargedCount || 0);
+        const message = result?.message
+            ? `${result.message} Deducted ${count} lesson charge${count === 1 ? "" : "s"}.`
+            : `Deducted ${count} lesson charge${count === 1 ? "" : "s"}.`;
+        setStatus(els.appsScriptMsg, message, result?.success ? "success" : "error");
+        await refreshTeacherStudents();
+    });
+
     els.exceptionForm?.addEventListener("submit", async (event) => {
         event.preventDefault();
         const submitter = event.submitter;
@@ -1867,6 +2245,57 @@ function wireTeacherActions() {
         withButtonLoading(event.currentTarget, "Refreshing...", () => refreshTeacherBookings()).catch(console.error);
     });
 
+    els.refreshStudentsBtn?.addEventListener("click", (event) => {
+        withButtonLoading(event.currentTarget, "Refreshing...", () => refreshTeacherStudents()).catch((error) => {
+            setStatus(els.teacherStudentsMsg, error.message || "Could not refresh students.", "error");
+        });
+    });
+
+    els.reconcileBalancesBtn?.addEventListener("click", (event) => {
+        withButtonLoading(event.currentTarget, "Deducting...", async () => {
+            const result = await reconcileStudentBalances();
+            await refreshTeacherStudents();
+            setStatus(els.teacherStudentsMsg, result.chargedCount
+                ? `Deducted ${result.chargedCount} due lesson charge${result.chargedCount === 1 ? "" : "s"}.`
+                : result.missingPriceCount
+                    ? "Some due lessons need a lesson price before deduction."
+                    : "No due lessons to deduct.", result.chargedCount ? "success" : result.missingPriceCount ? "error" : "");
+        }).catch((error) => {
+            setStatus(els.teacherStudentsMsg, error.message || "Could not deduct balances.", "error");
+        });
+    });
+
+    els.teacherStudentsList?.addEventListener("click", (event) => {
+        const toggle = event.target.closest("[data-student-action='toggle']");
+        if (!toggle) return;
+        const item = toggle.closest("[data-student-id]");
+        const editor = item?.querySelector("[data-student-editor]");
+        if (editor) editor.hidden = !editor.hidden;
+    });
+
+    els.teacherStudentsList?.addEventListener("submit", async (event) => {
+        const form = event.target.closest("[data-student-editor]");
+        if (!form) return;
+        event.preventDefault();
+        const item = form.closest("[data-student-id]");
+        const studentId = item?.dataset.studentId || "";
+        if (!studentId) return;
+        const submitter = event.submitter;
+        try {
+            await withButtonLoading(submitter, "Saving...", async () => {
+                await saveStudentFinance(
+                    studentId,
+                    form.querySelector("[data-student-balance]")?.value,
+                    form.querySelector("[data-student-price]")?.value
+                );
+                await refreshTeacherStudents();
+            });
+            setStatus(els.teacherStudentsMsg, "Student balance saved.", "success");
+        } catch (error) {
+            setStatus(els.teacherStudentsMsg, error.message || "Could not save student balance.", "error");
+        }
+    });
+
     els.clearBookingsBtn?.addEventListener("click", async () => {
         const confirmed = window.confirm("Delete all bookings from both private and public collections?");
         if (!confirmed) return;
@@ -1879,33 +2308,6 @@ function wireTeacherActions() {
             setStatus(els.teacherBookingMsg, "All bookings deleted.", "success");
         } catch (error) {
             setStatus(els.teacherBookingMsg, error.message || "Could not delete bookings.", "error");
-        }
-    });
-
-    els.refreshStudentsBtn?.addEventListener("click", (event) => {
-        withButtonLoading(event.currentTarget, "Refreshing...", () => refreshTeacherStudents()).catch((error) => {
-            setStatus(els.teacherStudentMsg, error.message || "Could not load students.", "error");
-        });
-    });
-
-    els.teacherStudentList?.addEventListener("click", async (event) => {
-        const button = event.target.closest("[data-student-admin-action]");
-        if (!button) return;
-        const item = button.closest("[data-student-id]");
-        const studentId = item?.dataset.studentId || "";
-        if (!studentId) return;
-        const action = button.dataset.studentAdminAction;
-        if (action !== "save-billing") return;
-        try {
-            await withButtonLoading(button, "Saving...", async () => {
-                const balance = item.querySelector("[data-student-balance]")?.value || "0";
-                const lessonPrice = item.querySelector("[data-student-price]")?.value || "0";
-                await saveStudentBilling(studentId, balance, lessonPrice);
-                await refreshTeacherStudents();
-            });
-            setStatus(els.teacherStudentMsg, "Student billing saved.", "success");
-        } catch (error) {
-            setStatus(els.teacherStudentMsg, error.message || "Could not save student billing.", "error");
         }
     });
 
@@ -1926,14 +2328,18 @@ function wireTeacherActions() {
         const shouldShowLoading = Boolean(teacherBookingLoadingText[action]);
         try {
             if (shouldShowLoading) {
+                setAppLoading(true, teacherBookingLoadingText[action]);
                 setButtonLoading(button, true, teacherBookingLoadingText[action]);
+                if (action === "reschedule") {
+                    setStatus(els.teacherBookingMsg, "Loading available times...");
+                    await waitForLoadingPaint();
+                }
             }
             if (action === "cancel") {
                 const deleteResult = await deleteCalendarEventForBooking(bookingId, booking);
                 if (deleteResult?.success === false && !isAlreadyDeletedCalendarEvent(deleteResult)) {
                     throw new Error(normalizeAppsScriptStudentError(deleteResult, "Could not remove this booking from Google Calendar."));
                 }
-                await refundBookingCharge({ bookingId, booking, reason: "teacher-cancel" });
                 await cancelBooking({ db: window.db, firebase: window.firebase, bookingId });
                 setStatus(els.teacherBookingMsg, "Booking canceled.", "success");
                 await refreshTeacherBookings();
@@ -1942,11 +2348,11 @@ function wireTeacherActions() {
             }
 
             if (action === "reschedule") {
-                await openReschedulePanel({
-                    itemEl: item,
+                await openRescheduleModal({
+                    role: "teacher",
+                    bookingId,
                     booking: { ...booking, id: bookingId },
-                    getAvailableSlots: (days, options) => getAvailableSlots(days, bookingDeps(), options),
-                    escapeHtml,
+                    allowCustom: true,
                 });
                 return;
             }
@@ -1959,8 +2365,17 @@ function wireTeacherActions() {
 
             if (action === "confirm-reschedule") {
                 const select = item.querySelector(".booking-resched-select");
-                const newSlot = Number(select?.value || 0);
-                if (!newSlot) return;
+                const selectedSlot = Number(select?.value || 0);
+                const customSlot = getCustomTeacherSlotMs(item);
+                const newSlot = selectedSlot || customSlot;
+                if (!newSlot) {
+                    setStatus(els.teacherBookingMsg, "Choose an available slot or enter a custom date and time.", "error");
+                    return;
+                }
+                if (newSlot <= Date.now()) {
+                    setStatus(els.teacherBookingMsg, "Choose a future time.", "error");
+                    return;
+                }
                 const conflict = await findBookingConflict(newSlot, bookingDeps(), { excludeBookingId: bookingId });
                 if (conflict) {
                     setStatus(els.teacherBookingMsg, "That slot is already taken.", "error");
@@ -1991,6 +2406,7 @@ function wireTeacherActions() {
             setStatus(els.teacherBookingMsg, error.message || "Booking update failed.", "error");
         } finally {
             if (shouldShowLoading) {
+                setAppLoading(false);
                 setButtonLoading(button, false);
             }
         }
@@ -2062,16 +2478,17 @@ function showScreen(screenId) {
         button.classList.toggle("is-active", button.getAttribute("data-target") === screenId);
     });
     if (screenId === "student-screen") {
-        ensureBookingCalendarLoaded().catch(console.error);
+        withAppLoading("Loading available times...", () => ensureBookingCalendarLoaded()).catch(console.error);
         startGoogleBusyAutoRefresh();
     }
 }
 
 async function handleAuthState(user) {
+    stopStudentProfileListener();
+    stopBalanceReconcileAutoRefresh();
     state.currentUser = user || null;
     state.currentRole = "";
     state.studentProfile = null;
-    state.studentBilling = { balance: 0, lessonPrice: 0 };
     state.teacherUser = null;
     state.teacherRole = "";
     state.publicSettingsLoaded = false;
@@ -2086,7 +2503,6 @@ async function handleAuthState(user) {
         setStatus(els.teacherAuthMsg, "Sign in to access teacher controls.");
         setStatus(els.teacherLoginMsg, "");
         updateStudentAuthUi();
-        updateStudentBillingUi();
         showScreen("welcome-screen");
         return;
     }
@@ -2100,10 +2516,6 @@ async function handleAuthState(user) {
     });
     state.currentRole = resolved.role || "student";
     state.studentProfile = resolved.data || {};
-    state.studentBilling = {
-        balance: getStudentBalance(resolved.data || {}),
-        lessonPrice: getStudentLessonPrice(resolved.data || {}),
-    };
 
     if (state.currentRole !== "teacher") {
         if (els.teacherDashboard) els.teacherDashboard.hidden = true;
@@ -2111,10 +2523,9 @@ async function handleAuthState(user) {
         setStatus(els.teacherAuthMsg, "Sign in to access teacher controls.");
         setStatus(els.teacherLoginMsg, "");
         updateStudentAuthUi();
-        updateStudentBillingUi();
         showScreen("student-screen");
+        startStudentProfileListener();
         await Promise.all([
-            refreshStudentBilling(),
             loadStudentBookings(),
             ensureBookingCalendarLoaded(),
         ]);
@@ -2145,6 +2556,7 @@ async function handleAuthState(user) {
         els.teacherPreplyCalendarId.value = teacherData.preplyCalendarId || teacherData.googleCalendar?.preplyCalendarId || "";
     }
     await refreshTeacherDashboard();
+    startBalanceReconcileAutoRefresh();
     refreshAppsScriptEmailQuota().catch(console.error);
     showScreen("teacher-screen");
 }
@@ -2163,12 +2575,12 @@ async function init() {
     showScreen("welcome-screen");
 
     if (!window.db || !window.auth) {
-        setStatus(els.bookingMsg, "Firebase runtime config is missing. Add js/config.runtime.js first.", "error");
+        setStatus(els.bookingMsg, "Firebase config is missing. Check js/config.js.", "error");
         return;
     }
 
     window.auth.onAuthStateChanged((user) => {
-        handleAuthState(user).catch(console.error);
+        withAppLoading("Loading account...", () => handleAuthState(user)).catch(console.error);
     });
 }
 

@@ -317,8 +317,7 @@ main.site-shell {
 }
 
 .panel--form,
-.panel--support,
-.panel--billing {
+.panel--support {
     background:
         linear-gradient(180deg, rgba(255, 253, 249, 0.98), rgba(250, 243, 234, 0.96));
 }
@@ -466,7 +465,8 @@ main.site-shell {
     width: 100%;
 }
 
-.btn[disabled] {
+.btn[disabled],
+.welcome-card[disabled] {
     cursor: not-allowed;
     opacity: 0.6;
     transform: none;
@@ -482,8 +482,49 @@ main.site-shell {
     animation: spin 0.8s linear infinite;
 }
 
-.btn.is-loading .btn__spinner {
+.btn.is-loading .btn__spinner,
+.is-loading .btn__spinner {
     display: inline-block;
+}
+
+.app-loading {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    display: none;
+    place-items: center;
+    padding: 20px;
+    background: rgba(15, 23, 42, 0.22);
+    backdrop-filter: blur(3px);
+}
+
+.app-loading.is-active {
+    display: grid;
+}
+
+.app-loading__box {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 190px;
+    max-width: min(340px, 100%);
+    padding: 16px 18px;
+    border: 1px solid rgba(15, 118, 110, 0.18);
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.96);
+    color: var(--primary-dark);
+    font-weight: 700;
+    box-shadow: var(--shadow);
+}
+
+.app-loading__spinner {
+    width: 20px;
+    height: 20px;
+    flex: 0 0 auto;
+    border-radius: 999px;
+    border: 3px solid rgba(15, 118, 110, 0.18);
+    border-top-color: var(--primary);
+    animation: spin 0.8s linear infinite;
 }
 
 .divider {
@@ -607,8 +648,7 @@ main.site-shell {
 
 .status-list,
 .exception-list,
-.booking-panel,
-.student-admin-list {
+.booking-panel {
     display: grid;
     gap: 12px;
 }
@@ -639,30 +679,29 @@ main.site-shell {
     font-size: 1.25rem;
 }
 
-.billing-summary {
+.student-balance {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
-}
-
-.billing-summary > div {
-    border: 1px solid rgba(15, 118, 110, 0.14);
-    border-radius: 18px;
-    padding: 14px;
-    background: rgba(255, 255, 255, 0.72);
-}
-
-.billing-summary span {
-    display: block;
-    color: var(--muted);
-    font-size: 0.88rem;
-}
-
-.billing-summary strong {
-    display: block;
-    margin-top: 4px;
+    gap: 4px;
+    margin-bottom: 14px;
+    padding: 14px 16px;
+    border: 1px solid rgba(15, 118, 110, 0.16);
+    border-radius: 16px;
+    background: rgba(15, 118, 110, 0.08);
     color: var(--primary-dark);
-    font-size: 1.35rem;
+}
+
+.student-balance[hidden] {
+    display: none;
+}
+
+.student-balance__label,
+.student-balance span:last-child {
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.student-balance strong {
+    font-size: 1.6rem;
 }
 
 .contact-card {
@@ -693,25 +732,9 @@ main.site-shell {
 }
 
 .exception-item,
-.booking-item,
-.student-admin-item {
+.booking-item {
     display: grid;
     gap: 10px;
-}
-
-.student-admin-item__head {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    flex-wrap: wrap;
-}
-
-.student-admin-item__name {
-    font-weight: 700;
-}
-
-.student-admin-item__meta {
-    color: var(--muted);
 }
 
 .booking-item__actions,
@@ -719,6 +742,10 @@ main.site-shell {
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
+}
+
+.booking-item__resched .form-grid {
+    width: 100%;
 }
 
 .booking-item__title {
@@ -749,6 +776,49 @@ main.site-shell {
 .booking-item__status--rescheduled {
     background: rgba(194, 65, 12, 0.12);
     color: var(--accent);
+}
+
+.student-admin-list {
+    display: grid;
+    gap: 12px;
+}
+
+.student-admin-item {
+    display: grid;
+    gap: 12px;
+}
+
+.student-admin-item__summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+}
+
+.student-admin-item__summary strong,
+.student-admin-item__summary span span {
+    display: block;
+}
+
+.student-admin-item__summary span span {
+    color: var(--muted);
+    font-size: 0.92rem;
+}
+
+.student-admin-item__money {
+    flex: 0 0 auto;
+    color: var(--primary-dark);
+    font-weight: 700;
+}
+
+.student-admin-editor[hidden] {
+    display: none;
 }
 
 .dashboard[hidden] {
@@ -904,10 +974,16 @@ main.site-shell {
     position: relative;
     z-index: 1;
     width: min(520px, calc(100% - 24px));
+    max-height: calc(100vh - 32px);
+    overflow: auto;
     padding: 24px;
     border-radius: 24px;
     background: var(--surface-strong);
     box-shadow: var(--shadow);
+}
+
+.modal__body--wide {
+    width: min(980px, calc(100% - 24px));
 }
 
 .modal__close {
@@ -931,6 +1007,32 @@ main.site-shell {
 
 .status-line.is-success {
     color: var(--primary-dark);
+}
+
+.reschedule-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 10px;
+    margin: 14px 0;
+}
+
+.reschedule-grid .booking-day-column {
+    min-height: 170px;
+    padding: 12px;
+}
+
+.reschedule-slot-btn {
+    text-align: center;
+}
+
+.reschedule-custom {
+    display: grid;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.reschedule-custom[hidden] {
+    display: none;
 }
 
 @keyframes spin {
@@ -1020,6 +1122,20 @@ main.site-shell {
         -webkit-overflow-scrolling: touch;
     }
 
+    .reschedule-grid {
+        display: flex;
+        grid-template-columns: none;
+        overflow-x: auto;
+        gap: 12px;
+        padding-bottom: 12px;
+        scroll-snap-type: x mandatory;
+    }
+
+    .reschedule-grid .booking-day-column {
+        flex: 0 0 min(82vw, 320px);
+        scroll-snap-align: start;
+    }
+
     .panel,
     .teacher-banner,
     .teacher-editor__section {
@@ -1032,6 +1148,11 @@ main.site-shell {
 
     .student-session-bar {
         align-items: stretch;
+        flex-direction: column;
+    }
+
+    .student-admin-item__summary {
+        align-items: flex-start;
         flex-direction: column;
     }
 
