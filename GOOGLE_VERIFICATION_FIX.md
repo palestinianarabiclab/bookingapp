@@ -46,7 +46,7 @@ https://www.googleapis.com/auth/calendar.events
 - `Authorized JavaScript origins` يحتوي رابط الموقع الذي تعمل عليه، مثل:
   `http://localhost:8000`
 - إذا كان الموقع منشورا على GitHub Pages أضف:
-  `https://farouqmurtaja96-source.github.io`
+  `https://palestinianarabiclab.github.io`
 - إذا كان التطبيق يستخدم redirect URI، أضف الرابط الكامل، مثل:
   `http://localhost:8000/`
   أو رابط GitHub Pages الكامل.
