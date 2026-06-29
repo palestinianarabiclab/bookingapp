@@ -1,1 +1,10 @@
 # Runtime config is intentionally committed for this static Vercel deployment.
+
+# Dependencies
+node_modules/
+
+# Package manager logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

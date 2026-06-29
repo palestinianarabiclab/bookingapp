@@ -1,0 +1,15 @@
+{
+  "name": "bookingapp",
+  "version": "1.0.0",
+  "description": "Lesson Booking Studio - A booking application for scheduling lessons",
+  "private": true,
+  "scripts": {
+    "install-deps": "npm install"
+  },
+  "dependencies": {
+    "@vercel/speed-insights": "^1.0.12"
+  },
+  "devDependencies": {},
+  "author": "",
+  "license": "ISC"
+}
