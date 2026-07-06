@@ -300,6 +300,14 @@ main.site-shell {
     display: block;
 }
 
+.student-session-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
 .grid-two--teacher {
     margin-bottom: 20px;
 }
@@ -1204,6 +1212,15 @@ main.site-shell {
     .student-session-bar {
         align-items: stretch;
         flex-direction: column;
+    }
+
+    .student-session-actions {
+        justify-content: stretch;
+    }
+
+    .student-session-actions .btn {
+        flex: 1;
+        text-align: center;
     }
 
     .student-admin-item__summary {
