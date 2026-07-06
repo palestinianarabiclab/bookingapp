@@ -101,9 +101,6 @@ function cacheDom() {
         "selectedTimeDisplay",
         "bookingForm",
         "bookingAccountSummary",
-        "studentOfferSummary",
-        "studentCourseOffer",
-        "studentLessonOffer",
         "studentPaypalReminder",
         "studentBalanceCard",
         "studentBalanceValue",
@@ -814,22 +811,6 @@ async function loadPublicSettings({ force = false } = {}) {
 
 function updateStudentOfferUi() {
     const offers = state.bookingSettings.courseOffers || {};
-    const coursePrice = toMoneyValue(offers.courseAccessPrice || 15);
-    const units = Math.max(1, Number(offers.courseAccessUnits || 15));
-    const freeTrialLessons = Math.max(0, Number(offers.freeTrialLessons || 1));
-    if (els.studentOfferSummary) {
-        els.studentOfferSummary.textContent = freeTrialLessons
-            ? `Your first ${freeTrialLessons === 1 ? "trial lesson is" : `${freeTrialLessons} trial lessons are`} free.`
-            : "Choose course access, private lessons, or both.";
-    }
-    if (els.studentCourseOffer) {
-        els.studentCourseOffer.textContent = `${formatMoney(coursePrice)} lifetime access for ${units} interactive course units.`;
-    }
-    if (els.studentLessonOffer) {
-        const parts = [];
-        if (freeTrialLessons) parts.push(`${freeTrialLessons === 1 ? "First trial lesson" : `First ${freeTrialLessons} trial lessons`} free`);
-        els.studentLessonOffer.textContent = parts.join(" | ") || "Ask the teacher about private online lessons.";
-    }
     if (els.studentPaypalReminder) {
         const reminder = offers.paypalReminder ||
             "Just a quick reminder: when you choose to pay through PayPal, please choose Goods and Services. Choosing another option may affect my PayPal account.";
