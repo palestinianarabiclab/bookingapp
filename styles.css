@@ -734,6 +734,30 @@ main.site-shell {
     font-size: 1.6rem;
 }
 
+.offer-list {
+    display: grid;
+    gap: 12px;
+}
+
+.offer-list > div {
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: rgba(255, 253, 249, 0.72);
+}
+
+.paypal-reminder {
+    border-color: rgba(194, 65, 12, 0.28) !important;
+    background: rgba(255, 240, 232, 0.64) !important;
+}
+
+.checkbox-field > label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+}
+
 .contact-card {
     border: 1px solid rgba(91, 100, 113, 0.14);
     border-radius: 22px;

@@ -92,6 +92,29 @@
                     <article class="panel panel--form">
                         <div class="panel__head">
                             <div>
+                                <h3>Learning Options</h3>
+                                <p class="small-note" id="studentOfferSummary">Choose course access, private lessons, or both.</p>
+                            </div>
+                        </div>
+                        <div class="offer-list">
+                            <div>
+                                <strong>Self-study course</strong>
+                                <p class="small-note" id="studentCourseOffer">Lifetime access price will appear here.</p>
+                            </div>
+                            <div>
+                                <strong>Private lessons</strong>
+                                <p class="small-note" id="studentLessonOffer">The first trial lesson is free.</p>
+                            </div>
+                            <div class="paypal-reminder">
+                                <strong>PayPal reminder</strong>
+                                <p class="small-note" id="studentPaypalReminder">Please choose Goods and Services when paying through PayPal.</p>
+                            </div>
+                        </div>
+                    </article>
+
+                    <article class="panel panel--form">
+                        <div class="panel__head">
+                            <div>
                                 <h3>Confirm Booking</h3>
                                 <p class="small-note" id="bookingAccountSummary">Sign in, choose a time, then confirm your lesson.</p>
                             </div>
@@ -218,6 +241,39 @@
                             <button id="teacherResetAvailabilityBtn" type="button" class="btn btn--outline">Reset Availability</button>
                         </div>
                         <p id="availabilityMsg" class="status-line"></p>
+                    </form>
+                </section>
+
+                <section class="teacher-editor__section">
+                    <h4>Course Offers & PayPal</h4>
+                    <p class="teacher-edit-note">
+                        Set the public course offer, lesson package defaults, and the PayPal reminder shown to students.
+                    </p>
+                    <form id="courseOffersForm" class="form-stack">
+                        <div class="inline-fields">
+                            <label class="field">
+                                <span>Course Price (USD)</span>
+                                <input id="courseAccessPrice" type="number" min="0" step="0.01" placeholder="15" />
+                            </label>
+                            <label class="field">
+                                <span>Course Units</span>
+                                <input id="courseAccessUnits" type="number" min="1" step="1" placeholder="15" />
+                            </label>
+                            <label class="field">
+                                <span>Free Trial Lessons</span>
+                                <input id="freeTrialLessons" type="number" min="0" step="1" placeholder="1" />
+                            </label>
+                        </div>
+                        <label class="field">
+                            <span>PayPal Payment Link</span>
+                            <input id="paypalPaymentLink" type="url" placeholder="https://www.paypal.com/..." />
+                        </label>
+                        <label class="field">
+                            <span>PayPal Reminder</span>
+                            <textarea id="paypalReminder" rows="3"></textarea>
+                        </label>
+                        <button type="submit" class="btn btn--primary">Save Offers</button>
+                        <p id="courseOffersMsg" class="status-line"></p>
                     </form>
                 </section>
 

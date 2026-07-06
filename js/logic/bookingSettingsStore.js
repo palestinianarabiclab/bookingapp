@@ -30,6 +30,13 @@ export function createInitialBookingSettings() {
         totalSlotMinutes: 60,
         days: defaultDays(),
         exceptions: [],
+        courseOffers: {
+            courseAccessPrice: 15,
+            courseAccessUnits: 15,
+            freeTrialLessons: 1,
+            paypalPaymentLink: "",
+            paypalReminder: "Just a quick reminder: when you choose to pay through PayPal, please choose Goods and Services. Choosing another option may affect my PayPal account.",
+        },
     };
 }
 
@@ -57,6 +64,10 @@ export function ensureBookingSettingsShape(settings) {
     if (!next.breakMinutes) next.breakMinutes = 10;
     if (!next.totalSlotMinutes) next.totalSlotMinutes = next.slotMinutes + next.breakMinutes;
     if (typeof next.timezone !== "string") next.timezone = "";
+    next.courseOffers = {
+        ...base.courseOffers,
+        ...(next.courseOffers || {}),
+    };
     return next;
 }
 

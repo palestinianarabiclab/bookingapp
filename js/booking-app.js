@@ -101,6 +101,10 @@ function cacheDom() {
         "selectedTimeDisplay",
         "bookingForm",
         "bookingAccountSummary",
+        "studentOfferSummary",
+        "studentCourseOffer",
+        "studentLessonOffer",
+        "studentPaypalReminder",
         "studentBalanceCard",
         "studentBalanceValue",
         "studentLessonPriceValue",
@@ -163,6 +167,13 @@ function cacheDom() {
         "availabilityForm",
         "availabilityMsg",
         "teacherResetAvailabilityBtn",
+        "courseOffersForm",
+        "courseAccessPrice",
+        "courseAccessUnits",
+        "freeTrialLessons",
+        "paypalPaymentLink",
+        "paypalReminder",
+        "courseOffersMsg",
         "contactSettingsForm",
         "teacherWhatsapp",
         "teacherContactEmail",
@@ -790,6 +801,7 @@ async function loadPublicSettings({ force = false } = {}) {
             email: typeof publicData.contactEmail === "string" ? publicData.contactEmail : "",
             sitePrice: typeof publicData.sitePrice === "string" ? publicData.sitePrice : "",
         };
+        updateStudentOfferUi();
         window.bookingSettings = state.bookingSettings;
         state.publicSettingsLoaded = true;
     })();
@@ -797,6 +809,34 @@ async function loadPublicSettings({ force = false } = {}) {
         await state.publicSettingsInFlight;
     } finally {
         state.publicSettingsInFlight = null;
+    }
+}
+
+function updateStudentOfferUi() {
+    const offers = state.bookingSettings.courseOffers || {};
+    const coursePrice = toMoneyValue(offers.courseAccessPrice || 15);
+    const units = Math.max(1, Number(offers.courseAccessUnits || 15));
+    const freeTrialLessons = Math.max(0, Number(offers.freeTrialLessons || 1));
+    if (els.studentOfferSummary) {
+        els.studentOfferSummary.textContent = freeTrialLessons
+            ? `Your first ${freeTrialLessons === 1 ? "trial lesson is" : `${freeTrialLessons} trial lessons are`} free.`
+            : "Choose course access, private lessons, or both.";
+    }
+    if (els.studentCourseOffer) {
+        els.studentCourseOffer.textContent = `${formatMoney(coursePrice)} lifetime access for ${units} interactive course units.`;
+    }
+    if (els.studentLessonOffer) {
+        const parts = [];
+        if (freeTrialLessons) parts.push(`${freeTrialLessons === 1 ? "First trial lesson" : `First ${freeTrialLessons} trial lessons`} free`);
+        els.studentLessonOffer.textContent = parts.join(" | ") || "Ask the teacher about private online lessons.";
+    }
+    if (els.studentPaypalReminder) {
+        const reminder = offers.paypalReminder ||
+            "Just a quick reminder: when you choose to pay through PayPal, please choose Goods and Services. Choosing another option may affect my PayPal account.";
+        const paypalLink = (offers.paypalPaymentLink || "").trim();
+        els.studentPaypalReminder.innerHTML = paypalLink
+            ? `${escapeHtml(reminder)} <a href="${escapeHtml(paypalLink)}" target="_blank" rel="noopener noreferrer">Open PayPal</a>`
+            : escapeHtml(reminder);
     }
 }
 
@@ -1752,6 +1792,15 @@ function syncTeacherFormFields() {
     if (els.teacherBreakMinutes) els.teacherBreakMinutes.value = String(state.bookingSettings.breakMinutes || 10);
     if (els.teacherWhatsapp) els.teacherWhatsapp.value = state.contactSettings.whatsapp || "";
     if (els.teacherContactEmail) els.teacherContactEmail.value = state.contactSettings.email || "";
+    const offers = state.bookingSettings.courseOffers || {};
+    if (els.courseAccessPrice) els.courseAccessPrice.value = String(offers.courseAccessPrice ?? 15);
+    if (els.courseAccessUnits) els.courseAccessUnits.value = String(offers.courseAccessUnits ?? 15);
+    if (els.freeTrialLessons) els.freeTrialLessons.value = String(offers.freeTrialLessons ?? 1);
+    if (els.paypalPaymentLink) els.paypalPaymentLink.value = String(offers.paypalPaymentLink ?? "");
+    if (els.paypalReminder) {
+        els.paypalReminder.value = offers.paypalReminder ||
+            "Just a quick reminder: when you choose to pay through PayPal, please choose Goods and Services. Choosing another option may affect my PayPal account.";
+    }
     renderTeacherDays();
     renderExceptions();
 }
@@ -1800,6 +1849,7 @@ async function saveBookingSettingsPublicMirror() {
         totalSlotMinutes: state.bookingSettings.totalSlotMinutes,
         days: state.bookingSettings.days,
         exceptions: state.bookingSettings.exceptions,
+        courseOffers: state.bookingSettings.courseOffers || {},
         updatedAt: Date.now(),
     }, { merge: true });
 }
@@ -1817,6 +1867,20 @@ async function saveTeacherSettings() {
     window.bookingSettings = state.bookingSettings;
     await saveBookingSettingsToCloud(window.db, state.bookingSettings);
     await saveBookingSettingsPublicMirror();
+}
+
+async function saveCourseOffers() {
+    state.bookingSettings.courseOffers = {
+        courseAccessPrice: toMoneyValue(els.courseAccessPrice?.value || 15),
+        courseAccessUnits: Math.max(1, Number.parseInt(els.courseAccessUnits?.value || "15", 10) || 15),
+        freeTrialLessons: Math.max(0, Number.parseInt(els.freeTrialLessons?.value || "1", 10) || 0),
+        paypalPaymentLink: (els.paypalPaymentLink?.value || "").trim().slice(0, 500),
+        paypalReminder: (els.paypalReminder?.value || "").trim().slice(0, 500),
+        updatedAt: Date.now(),
+    };
+    await saveTeacherSettings();
+    updateStudentOfferUi();
+    setStatus(els.courseOffersMsg, "Course offers saved.", "success");
 }
 
 async function saveTeacherContactSettings() {
@@ -1904,6 +1968,8 @@ async function refreshTeacherStudents() {
             state.studentCache.set(student.id, student);
             const balance = formatMoney(student.balance);
             const lessonPrice = toMoneyValue(student.lessonPrice);
+            const courseAccess = student.courseAccess === true;
+            const accessLabel = courseAccess ? "Course: unlocked" : "Course: locked";
             return `
                 <div class="student-admin-item" data-student-id="${escapeHtml(student.id)}">
                     <button class="student-admin-item__summary" type="button" data-student-action="toggle">
@@ -1911,7 +1977,7 @@ async function refreshTeacherStudents() {
                             <strong>${escapeHtml(student.name || "Student")}</strong>
                             <span>${escapeHtml(student.email || "")}</span>
                         </span>
-                        <span class="student-admin-item__money">Balance: ${balance}</span>
+                        <span class="student-admin-item__money">Balance: ${balance} | ${accessLabel}</span>
                     </button>
                     <form class="student-admin-editor" data-student-editor hidden>
                         <div class="inline-fields">
@@ -1928,6 +1994,33 @@ async function refreshTeacherStudents() {
                                 <input value="${escapeHtml(student.phone || "")}" disabled />
                             </label>
                         </div>
+                        <label class="field checkbox-field">
+                            <span>Course Access</span>
+                            <label><input data-student-course-access type="checkbox" ${courseAccess ? "checked" : ""} /> Unlock full course for this student</label>
+                        </label>
+                        <div class="inline-fields">
+                            <label class="field">
+                                <span>Access Type</span>
+                                <select data-student-access-type>
+                                    <option value="none" ${!courseAccess ? "selected" : ""}>No access</option>
+                                    <option value="lifetime" ${student.accessType === "lifetime" ? "selected" : ""}>Lifetime</option>
+                                    <option value="trial" ${student.accessType === "trial" ? "selected" : ""}>Trial</option>
+                                    <option value="manual" ${student.accessType === "manual" ? "selected" : ""}>Manual</option>
+                                </select>
+                            </label>
+                            <label class="field">
+                                <span>Payment Status</span>
+                                <select data-student-payment-status>
+                                    <option value="none" ${!student.paymentStatus || student.paymentStatus === "none" ? "selected" : ""}>None</option>
+                                    <option value="pending" ${student.paymentStatus === "pending" ? "selected" : ""}>Pending</option>
+                                    <option value="approved" ${student.paymentStatus === "approved" ? "selected" : ""}>Approved</option>
+                                </select>
+                            </label>
+                            <label class="field">
+                                <span>Payment Note</span>
+                                <input data-student-payment-note type="text" value="${escapeHtml(student.paymentNote || "")}" placeholder="PayPal email, transaction ID, offer..." />
+                            </label>
+                        </div>
                         <div class="action-row">
                             <button class="btn btn--primary btn--small" type="submit" data-student-action="save">Save Student</button>
                             <button class="btn btn--ghost btn--small" type="button" data-student-action="delete">Delete Student</button>
@@ -1942,10 +2035,16 @@ async function refreshTeacherStudents() {
     }
 }
 
-async function saveStudentFinance(studentId, balance, lessonPrice) {
+async function saveStudentFinance(studentId, balance, lessonPrice, accessData = {}) {
     await window.db.collection("users").doc(studentId).set({
         balance: toMoneyValue(balance),
         lessonPrice: toMoneyValue(lessonPrice),
+        courseAccess: accessData.courseAccess === true,
+        accessType: accessData.courseAccess ? (accessData.accessType || "lifetime") : "none",
+        accessProduct: accessData.courseAccess ? "palestinian-arabic-starter" : "",
+        paymentStatus: accessData.paymentStatus || "none",
+        paymentNote: (accessData.paymentNote || "").trim().slice(0, 300),
+        courseAccessUpdatedAt: Date.now(),
         financeUpdatedAt: Date.now(),
         updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });
@@ -2187,6 +2286,15 @@ function wireTeacherActions() {
         });
     });
 
+    els.courseOffersForm?.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        try {
+            await withButtonLoading(event.submitter, "Saving...", saveCourseOffers);
+        } catch (error) {
+            setStatus(els.courseOffersMsg, error.message || "Could not save course offers.", "error");
+        }
+    });
+
     els.contactSettingsForm?.addEventListener("submit", async (event) => {
         event.preventDefault();
         const submitter = event.submitter;
@@ -2372,13 +2480,19 @@ function wireTeacherActions() {
                 await saveStudentFinance(
                     studentId,
                     form.querySelector("[data-student-balance]")?.value,
-                    form.querySelector("[data-student-price]")?.value
+                    form.querySelector("[data-student-price]")?.value,
+                    {
+                        courseAccess: !!form.querySelector("[data-student-course-access]")?.checked,
+                        accessType: form.querySelector("[data-student-access-type]")?.value || "none",
+                        paymentStatus: form.querySelector("[data-student-payment-status]")?.value || "none",
+                        paymentNote: form.querySelector("[data-student-payment-note]")?.value || "",
+                    }
                 );
                 await refreshTeacherStudents();
             });
-            setStatus(els.teacherStudentsMsg, "Student balance saved.", "success");
+            setStatus(els.teacherStudentsMsg, "Student settings saved.", "success");
         } catch (error) {
-            setStatus(els.teacherStudentsMsg, error.message || "Could not save student balance.", "error");
+            setStatus(els.teacherStudentsMsg, error.message || "Could not save student settings.", "error");
         }
     });
 
