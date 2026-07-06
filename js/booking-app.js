@@ -102,6 +102,8 @@ function cacheDom() {
         "bookingForm",
         "bookingAccountSummary",
         "studentPaypalReminder",
+        "requestCourseAccessBtn",
+        "courseAccessRequestMsg",
         "studentBalanceCard",
         "studentBalanceValue",
         "studentLessonPriceValue",
@@ -502,6 +504,55 @@ function updateStudentBalanceUi() {
     }
 }
 
+function updateCourseAccessRequestUi() {
+    const signedIn = isStudentSignedIn();
+    const hasAccess = state.studentProfile?.courseAccess === true;
+    const requested = state.studentProfile?.courseAccessRequested === true || state.studentProfile?.paymentStatus === "pending";
+    if (els.requestCourseAccessBtn) {
+        els.requestCourseAccessBtn.hidden = hasAccess;
+        els.requestCourseAccessBtn.disabled = !signedIn || requested;
+        els.requestCourseAccessBtn.textContent = hasAccess
+            ? "Course Access Active"
+            : requested
+                ? "Access Request Sent"
+                : "Request Full Course Access";
+    }
+    if (els.courseAccessRequestMsg) {
+        if (!signedIn) {
+            els.courseAccessRequestMsg.textContent = "Sign in first, then request full course access.";
+        } else if (hasAccess) {
+            els.courseAccessRequestMsg.textContent = "Full course access is active on your account.";
+        } else if (requested) {
+            els.courseAccessRequestMsg.textContent = "Your access request is pending teacher approval.";
+        } else {
+            els.courseAccessRequestMsg.textContent = "";
+        }
+    }
+}
+
+async function requestFullCourseAccess() {
+    if (!isStudentSignedIn()) {
+        els.studentAuthModal?.classList.add("modal--open");
+        setStatus(els.courseAccessRequestMsg, "Please sign in or create an account first.", "error");
+        return;
+    }
+    const offers = state.bookingSettings.courseOffers || {};
+    await window.db.collection("users").doc(state.currentUser.uid).set({
+        email: state.currentUser.email || "",
+        name: getStudentName(),
+        role: "student",
+        courseAccessRequested: true,
+        courseAccessRequestedAt: Date.now(),
+        courseAccess: state.studentProfile?.courseAccess === true,
+        paymentStatus: "pending",
+        paymentNote: "Student requested full course access from the booking site.",
+        requestedProduct: "palestinian-arabic-starter",
+        requestedPrice: toMoneyValue(offers.courseAccessPrice),
+        updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    setStatus(els.courseAccessRequestMsg, "Request sent. Please complete PayPal payment if you have not paid yet.", "success");
+}
+
 async function sendPasswordResetLink({ emailInput, statusElement, button }) {
     if (!window.auth || typeof window.auth.sendPasswordResetEmail !== "function") {
         setStatus(statusElement, "Firebase password reset is not available.", "error");
@@ -574,6 +625,7 @@ function updateStudentAuthUi() {
         els.studentLogoutBtn.hidden = !signedIn;
     }
     updateStudentBalanceUi();
+    updateCourseAccessRequestUi();
     updateBookingSubmitState();
 }
 
@@ -1481,6 +1533,12 @@ function wireStudentActions() {
         await withButtonLoading(els.studentLogoutBtn, "Signing out...", () => window.auth.signOut());
     });
 
+    els.requestCourseAccessBtn?.addEventListener("click", async () => {
+        await withButtonLoading(els.requestCourseAccessBtn, "Sending...", requestFullCourseAccess).catch((error) => {
+            setStatus(els.courseAccessRequestMsg, error.message || "Could not send access request.", "error");
+        });
+    });
+
     els.bookingWeekPrev?.addEventListener("click", (event) => {
         withButtonLoading(event.currentTarget, "Loading...", async () => {
             state.bookingWeekOffset = Math.max(0, state.bookingWeekOffset - 1);
@@ -1951,6 +2009,8 @@ async function refreshTeacherStudents() {
             const lessonPrice = toMoneyValue(student.lessonPrice);
             const courseAccess = student.courseAccess === true;
             const accessLabel = courseAccess ? "Course: unlocked" : "Course: locked";
+            const accessRequested = student.courseAccessRequested === true || student.paymentStatus === "pending";
+            const requestLabel = accessRequested && !courseAccess ? " | Access requested" : "";
             return `
                 <div class="student-admin-item" data-student-id="${escapeHtml(student.id)}">
                     <button class="student-admin-item__summary" type="button" data-student-action="toggle">
@@ -1958,9 +2018,10 @@ async function refreshTeacherStudents() {
                             <strong>${escapeHtml(student.name || "Student")}</strong>
                             <span>${escapeHtml(student.email || "")}</span>
                         </span>
-                        <span class="student-admin-item__money">Balance: ${balance} | ${accessLabel}</span>
+                        <span class="student-admin-item__money">Balance: ${balance} | ${accessLabel}${requestLabel}</span>
                     </button>
                     <form class="student-admin-editor" data-student-editor hidden>
+                        ${accessRequested && !courseAccess ? "<p class=\"status-line\">This student requested full course access.</p>" : ""}
                         <div class="inline-fields">
                             <label class="field">
                                 <span>Balance</span>
@@ -2025,6 +2086,7 @@ async function saveStudentFinance(studentId, balance, lessonPrice, accessData = 
         accessProduct: accessData.courseAccess ? "palestinian-arabic-starter" : "",
         paymentStatus: accessData.paymentStatus || "none",
         paymentNote: (accessData.paymentNote || "").trim().slice(0, 300),
+        courseAccessRequested: accessData.courseAccess ? false : accessData.courseAccessRequested === true,
         courseAccessUpdatedAt: Date.now(),
         financeUpdatedAt: Date.now(),
         updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
@@ -2456,6 +2518,8 @@ function wireTeacherActions() {
         const studentId = item?.dataset.studentId || "";
         if (!studentId) return;
         const submitter = event.submitter;
+        const existingStudent = state.studentCache.get(studentId) || {};
+        const courseAccessChecked = !!form.querySelector("[data-student-course-access]")?.checked;
         try {
             await withButtonLoading(submitter, "Saving...", async () => {
                 await saveStudentFinance(
@@ -2463,10 +2527,11 @@ function wireTeacherActions() {
                     form.querySelector("[data-student-balance]")?.value,
                     form.querySelector("[data-student-price]")?.value,
                     {
-                        courseAccess: !!form.querySelector("[data-student-course-access]")?.checked,
+                        courseAccess: courseAccessChecked,
                         accessType: form.querySelector("[data-student-access-type]")?.value || "none",
                         paymentStatus: form.querySelector("[data-student-payment-status]")?.value || "none",
                         paymentNote: form.querySelector("[data-student-payment-note]")?.value || "",
+                        courseAccessRequested: !courseAccessChecked && existingStudent.courseAccessRequested === true,
                     }
                 );
                 await refreshTeacherStudents();
