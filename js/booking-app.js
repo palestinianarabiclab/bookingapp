@@ -543,7 +543,6 @@ async function requestFullCourseAccess() {
         role: "student",
         courseAccessRequested: true,
         courseAccessRequestedAt: Date.now(),
-        courseAccess: state.studentProfile?.courseAccess === true,
         paymentStatus: "pending",
         paymentNote: "Student requested full course access from the booking site.",
         requestedProduct: "palestinian-arabic-starter",
