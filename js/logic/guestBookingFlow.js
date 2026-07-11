@@ -206,7 +206,12 @@ export async function submitGuestBooking({
             appsScriptMessage = appsScriptSync.message || "";
         } else {
             appsScriptMessage = appsScriptSync?.message || "";
-            throw new Error(appsScriptMessage || "Could not create the booking in Google Calendar. Please try again.");
+            // Keep the Firestore booking even when Calendar is temporarily unavailable.
+            // `calendarSynced: false` lets the teacher retry it from the sync tools.
+            console.warn(
+                "Google Calendar sync failed; saving booking for a later retry.",
+                appsScriptMessage || "Unknown Apps Script error."
+            );
         }
 
         const bookingData = {
@@ -274,6 +279,8 @@ export async function submitGuestBooking({
                 bookingMsg.textContent = studentEmailSent
                     ? "Booked! A confirmation email was sent."
                     : "Booked! A calendar invite was sent to the student.";
+            } else if (!calendarSynced) {
+                bookingMsg.textContent = "Booked successfully. Calendar sync is pending and will be retried.";
             } else if (appsScriptMessage) {
                 const details = [teacherEmailError, studentEmailError, studentCalendarInviteError, appsScriptMessage].filter(Boolean).join(" | ");
                 bookingMsg.textContent = `Booked successfully, but email sending did not complete: ${details}`;
@@ -291,6 +298,8 @@ export async function submitGuestBooking({
                     ? " The teacher email was sent."
                     : (studentEmailSent || studentCalendarInviteSent)
                         ? " A confirmation email was sent to your inbox."
+                    : !calendarSynced
+                        ? " Calendar sync is pending and will be retried."
                         : appsScriptMessage
                             ? ` Email sending did not complete: ${[teacherEmailError, studentEmailError, studentCalendarInviteError, appsScriptMessage].filter(Boolean).join(" | ")}`
                             : " No email was sent.";
