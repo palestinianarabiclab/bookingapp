@@ -86,6 +86,9 @@ export async function submitGuestBooking({
         recaptchaReady,
         studentUid,
     } = formValues;
+    const normalizedPhone = String(phone || "").trim().startsWith("+")
+        ? `+${String(phone || "").replace(/\D/g, "")}`
+        : String(phone || "").replace(/\D/g, "");
 
     if (!selectedDate || !selectedTime) {
         if (bookingMsg) bookingMsg.textContent = "Please select a date and time.";
@@ -188,7 +191,7 @@ export async function submitGuestBooking({
             teacherEmail: (contactSettings?.email || "").trim(),
             name,
             email,
-            phone,
+            phone: normalizedPhone,
             notes: combinedNotes,
             studentTimeZone,
             studentLocale,
@@ -217,7 +220,7 @@ export async function submitGuestBooking({
         const bookingData = {
             name,
             email,
-            phone,
+            phone: normalizedPhone,
             notes: combinedNotes,
             source: "student",
             studentUid,
@@ -316,7 +319,13 @@ export async function submitGuestBooking({
         await buildBookingSelects();
     } catch (err) {
         console.error("Booking failed with error:", err);
-        if (bookingMsg) bookingMsg.textContent = "Booking failed. Please try again.";
+        const permissionDenied = ["permission-denied", "firestore/permission-denied"]
+            .includes(err?.code);
+        if (bookingMsg) {
+            bookingMsg.textContent = permissionDenied
+                ? "The calendar email was sent, but Firestore rejected the booking. Please contact the teacher."
+                : "Booking failed. Please try again.";
+        }
     } finally {
         if (bookingSubmit) bookingSubmit.classList.remove("is-loading");
         if (bookingSubmitLabel) bookingSubmitLabel.textContent = "Confirm Selected Time";

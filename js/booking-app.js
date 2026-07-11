@@ -1049,7 +1049,7 @@ async function loadStudentBookings() {
         let snap;
         try {
             snap = await window.db
-                .collection("bookings")
+                .collection("publicBookings")
                 .where("studentUid", "==", state.currentUser.uid)
                 .orderBy("slot", "desc")
                 .limit(10)
@@ -1062,7 +1062,7 @@ async function loadStudentBookings() {
                 throw queryError;
             }
             snap = await window.db
-                .collection("bookings")
+                .collection("publicBookings")
                 .where("studentUid", "==", state.currentUser.uid)
                 .limit(50)
                 .get();

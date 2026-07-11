@@ -18,7 +18,10 @@ service cloud.firestore {
     }
 
     function isTeacher() {
-      return signedIn() && requestUserDoc().data.role == "teacher";
+      return signedIn() && (
+        requestUserDoc().data.role == "teacher" ||
+        exists(/databases/$(database)/documents/teachers/$(request.auth.uid))
+      );
     }
 
     function isValidEmail(email) {
