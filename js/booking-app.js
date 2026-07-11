@@ -1974,13 +1974,22 @@ function startBalanceReconcileAutoRefresh() {
         if (!state.teacherUser || state.teacherRole !== "teacher") return;
         reconcileStudentBalances()
             .then(async (result) => {
-                if (!result?.chargedCount) return;
-                setStatus(els.teacherStudentsMsg, `Deducted ${result.chargedCount} due lesson charge${result.chargedCount === 1 ? "" : "s"}.`, "success");
-                await refreshTeacherStudents();
-                await refreshTeacherBookings();
+                if (result?.chargedCount) {
+                    setStatus(els.teacherStudentsMsg, `Deducted ${result.chargedCount} due lesson charge${result.chargedCount === 1 ? "" : "s"}.`, "success");
+                    await refreshTeacherStudents();
+                }
+                // New student bookings can arrive while the teacher dashboard is open.
+                // Refresh the list even when no balance reconciliation was needed.
+                state.bookingCache = await renderTeacherBookings({
+                    db: window.db,
+                    teacherBookingList: els.teacherBookingList,
+                    bookingCache: state.bookingCache,
+                    escapeHtml,
+                    formatSlotTime,
+                });
             })
             .catch(console.error);
-    }, 60000);
+    }, 30000);
 }
 
 function stopBalanceReconcileAutoRefresh() {

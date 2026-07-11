@@ -85,7 +85,8 @@ export async function renderTeacherBookings({
             })
             .join("");
         return bookingCache;
-    } catch {
+    } catch (error) {
+        console.error("Could not load teacher bookings.", error);
         teacherBookingList.innerHTML = "<div class=\"small-note\">Unable to load bookings.</div>";
         return bookingCache;
     }
