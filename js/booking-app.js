@@ -865,10 +865,26 @@ function updateStudentOfferUi() {
     if (els.studentPaypalReminder) {
         const reminder = offers.paypalReminder ||
             "Just a quick reminder: when you choose to pay through PayPal, please choose Goods and Services. Choosing another option may affect my PayPal account.";
-        const paypalLink = (offers.paypalPaymentLink || "").trim();
+        const paypalLink = normalizePayPalLink(offers.paypalPaymentLink);
         els.studentPaypalReminder.innerHTML = paypalLink
             ? `${escapeHtml(reminder)} <a href="${escapeHtml(paypalLink)}" target="_blank" rel="noopener noreferrer">Open PayPal</a>`
             : escapeHtml(reminder);
+    }
+}
+
+function normalizePayPalLink(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    try {
+        const url = new URL(raw);
+        const host = url.hostname.toLowerCase();
+        const isPayPalHost = host === "paypal.com"
+            || host.endsWith(".paypal.com")
+            || host === "paypal.me"
+            || host.endsWith(".paypal.me");
+        return url.protocol === "https:" && isPayPalHost ? url.href : "";
+    } catch {
+        return "";
     }
 }
 
@@ -1845,22 +1861,30 @@ function syncTeacherFormFields() {
 
 function renderExceptions() {
     if (!els.exceptionList) return;
-    const exceptions = Array.isArray(state.bookingSettings.exceptions)
-        ? [...state.bookingSettings.exceptions]
-        : [];
-    exceptions.sort((a, b) => `${a.date} ${a.start}`.localeCompare(`${b.date} ${b.start}`));
+    const now = Date.now();
+    const timezone = getTeacherTimezone();
+    const exceptions = (Array.isArray(state.bookingSettings.exceptions)
+        ? state.bookingSettings.exceptions
+        : [])
+        .map((item, originalIndex) => ({ item, originalIndex }))
+        .filter(({ item }) => {
+            if (!item?.date || !item?.end) return true;
+            const endMs = zonedDateTimeToUtcMs(item.date, item.end, timezone);
+            return !Number.isFinite(endMs) || endMs > now;
+        });
+    exceptions.sort((a, b) => `${a.item.date} ${a.item.start}`.localeCompare(`${b.item.date} ${b.item.start}`));
 
     if (!exceptions.length) {
         els.exceptionList.innerHTML = `<div class="empty-state">No busy blocks yet.</div>`;
         return;
     }
 
-    els.exceptionList.innerHTML = exceptions.map((item, index) => `
+    els.exceptionList.innerHTML = exceptions.map(({ item, originalIndex }) => `
         <div class="exception-item">
             <div><strong>${escapeHtml(item.date || "")}</strong> ${escapeHtml(item.start || "")} - ${escapeHtml(item.end || "")}</div>
             <div class="small-note">${escapeHtml(item.note || "Busy")}</div>
             <div class="action-row">
-                <button type="button" class="btn btn--ghost btn--small" data-remove-exception="${index}">Remove</button>
+                <button type="button" class="btn btn--ghost btn--small" data-remove-exception="${originalIndex}">Remove</button>
             </div>
         </div>
     `).join("");
@@ -1877,6 +1901,22 @@ function renderExceptions() {
             });
         });
     });
+}
+
+function removeExpiredExceptions() {
+    const exceptions = Array.isArray(state.bookingSettings.exceptions)
+        ? state.bookingSettings.exceptions
+        : [];
+    const now = Date.now();
+    const timezone = getTeacherTimezone();
+    const active = exceptions.filter((item) => {
+        if (!item?.date || !item?.end) return true;
+        const endMs = zonedDateTimeToUtcMs(item.date, item.end, timezone);
+        return !Number.isFinite(endMs) || endMs > now;
+    });
+    const removedCount = exceptions.length - active.length;
+    if (removedCount) state.bookingSettings.exceptions = active;
+    return removedCount;
 }
 
 async function saveBookingSettingsPublicMirror() {
@@ -1908,11 +1948,16 @@ async function saveTeacherSettings() {
 }
 
 async function saveCourseOffers() {
+    const rawPayPalLink = (els.paypalPaymentLink?.value || "").trim();
+    const paypalPaymentLink = normalizePayPalLink(rawPayPalLink);
+    if (rawPayPalLink && !paypalPaymentLink) {
+        throw new Error("Use a secure https://paypal.com or https://paypal.me payment link.");
+    }
     state.bookingSettings.courseOffers = {
         courseAccessPrice: toMoneyValue(els.courseAccessPrice?.value || 15),
         courseAccessUnits: Math.max(1, Number.parseInt(els.courseAccessUnits?.value || "15", 10) || 15),
         freeTrialLessons: Math.max(0, Number.parseInt(els.freeTrialLessons?.value || "1", 10) || 0),
-        paypalPaymentLink: (els.paypalPaymentLink?.value || "").trim().slice(0, 500),
+        paypalPaymentLink: paypalPaymentLink.slice(0, 500),
         paypalReminder: (els.paypalReminder?.value || "").trim().slice(0, 500),
         updatedAt: Date.now(),
     };
@@ -1939,6 +1984,9 @@ async function refreshTeacherDashboard() {
         ...(teacherData.contactSettings || {}),
     };
     window.bookingSettings = state.bookingSettings;
+    if (removeExpiredExceptions() > 0) {
+        await saveTeacherSettings();
+    }
     await refreshRuntimeBusyBlocks();
     syncTeacherFormFields();
     const balanceResult = await reconcileStudentBalances();

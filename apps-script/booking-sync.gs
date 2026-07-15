@@ -691,7 +691,8 @@ function handleRequest_(e) {
           additionalCalendars: (config.additionalCalendarIds || []).length,
         }
       };
-      cache.put(cacheKey, JSON.stringify(payload), 120);
+      // Keep cancellations responsive; the client refreshes availability every minute.
+      cache.put(cacheKey, JSON.stringify(payload), 30);
       return jsonOut(payload);
     }
 

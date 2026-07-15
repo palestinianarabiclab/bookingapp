@@ -42,6 +42,19 @@ service cloud.firestore {
       return status in ["booked", "pending", "canceled", "rescheduled"];
     }
 
+    function isValidPayPalLink(link) {
+      return link == "" || (link is string && link.size() <= 500 && (
+        link.matches('^https://([a-zA-Z0-9-]+\\.)*paypal\\.com(/.*)?$') ||
+        link.matches('^https://([a-zA-Z0-9-]+\\.)*paypal\\.me(/.*)?$')
+      ));
+    }
+
+    function hasSafeCourseOffers(data) {
+      return !data.keys().hasAny(['courseOffers']) ||
+        !data.courseOffers.keys().hasAny(['paypalPaymentLink']) ||
+        isValidPayPalLink(data.courseOffers.paypalPaymentLink);
+    }
+
     function canStudentChangeBooking() {
       return signedIn() &&
         resource.data.studentUid == request.auth.uid &&
@@ -77,6 +90,7 @@ service cloud.firestore {
           'balance',
           'lessonPrice',
           'courseAccess',
+          'courseAccessRequested',
           'accessType',
           'accessProduct',
           'paymentStatus',
@@ -114,6 +128,7 @@ service cloud.firestore {
       allow read: if true;
 
       allow create, update: if isTeacher() &&
+        hasSafeCourseOffers(request.resource.data) &&
         request.resource.data.keys().hasOnly([
           'timezone',
           'slotMinutes',

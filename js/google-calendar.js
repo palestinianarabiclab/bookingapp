@@ -571,15 +571,14 @@ window.importGoogleCalendarEventsToBusyBlocks = async function importGoogleCalen
         const events = await getGoogleCalendarEvents(startDate, endDate);
         console.log(`Found ${events.length} events in Google Calendar`);
         
-        if (events.length === 0) {
-            return { success: true, message: window.preplyCalendarId ? "No events found in Google or Preply calendars." : "No events found. Add your Preply calendar ID if needed." };
-        }
-        
         const bookingRef = firebase.firestore().collection("teachers").doc(user.uid);
         const bookingSnap = await bookingRef.get();
         const bookingData = bookingSnap.exists ? (bookingSnap.data() || {}) : {};
         const teacherBookingSettings = bookingData.bookingSettings || {};
-        const exceptions = Array.isArray(teacherBookingSettings.exceptions) ? teacherBookingSettings.exceptions : [];
+        const existingExceptions = Array.isArray(teacherBookingSettings.exceptions) ? teacherBookingSettings.exceptions : [];
+        // Imported calendar blocks are a mirror, not permanent manual exceptions.
+        // Rebuild that part of the list so deleted/cancelled Google events become available again.
+        const exceptions = existingExceptions.filter((block) => block?.source !== "googleCalendar");
         
         let addedCount = 0;
         let skippedCount = 0;
@@ -608,7 +607,9 @@ window.importGoogleCalendarEventsToBusyBlocks = async function importGoogleCalen
                     date: dateStr,
                     start: startStr,
                     end: endStr,
-                    note: event.summary || 'Google Calendar Event'
+                    note: event.summary || 'Google Calendar Event',
+                    source: 'googleCalendar',
+                    sourceEventId: event.id || ''
                 });
                 addedCount++;
             } else {
@@ -616,13 +617,22 @@ window.importGoogleCalendarEventsToBusyBlocks = async function importGoogleCalen
             }
         }
         
-        await bookingRef.set({ bookingSettings: { ...teacherBookingSettings, exceptions } }, { merge: true });
+        const nextBookingSettings = { ...teacherBookingSettings, exceptions };
+        await Promise.all([
+            bookingRef.set({ bookingSettings: nextBookingSettings }, { merge: true }),
+            firebase.firestore().collection("bookingSettings").doc("primary").set({
+                exceptions,
+                updatedAt: Date.now()
+            }, { merge: true })
+        ]);
         window.bookingSettings = { ...window.bookingSettings, exceptions };
         
         console.log(`Imported ${addedCount} events, skipped ${skippedCount} existing events`);
         return { 
             success: true, 
-            message: `Imported ${addedCount} events to busy blocks${window.preplyCalendarId ? " (including Preply calendar)" : ""}.`,
+            message: events.length
+                ? `Synced ${addedCount} current calendar events${window.preplyCalendarId ? " (including Preply calendar)" : ""}.`
+                : "Calendar sync is current; removed old imported busy blocks.",
             addedCount,
             skippedCount
         };
