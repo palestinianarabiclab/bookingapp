@@ -1859,6 +1859,19 @@ function syncTeacherFormFields() {
     renderExceptions();
 }
 
+function getExceptionEndMs(item, timezone) {
+    const [year, month, day] = String(item?.date || "").split("-").map(Number);
+    const [endHour, endMinute] = String(item?.end || "").split(":").map(Number);
+    if (![year, month, day, endHour, endMinute].every(Number.isFinite)) return NaN;
+
+    const [startHour, startMinute] = String(item?.start || "").split(":").map(Number);
+    const crossesMidnight = [startHour, startMinute].every(Number.isFinite)
+        && endHour * 60 + endMinute <= startHour * 60 + startMinute;
+    const endDate = crossesMidnight ? addDaysToDateKey(item.date, 1) : item.date;
+    const [endYear, endMonth, endDay] = endDate.split("-").map(Number);
+    return zonedDateTimeToUtcMs(timezone, endYear, endMonth, endDay, endHour, endMinute);
+}
+
 function renderExceptions() {
     if (!els.exceptionList) return;
     const now = Date.now();
@@ -1869,7 +1882,7 @@ function renderExceptions() {
         .map((item, originalIndex) => ({ item, originalIndex }))
         .filter(({ item }) => {
             if (!item?.date || !item?.end) return true;
-            const endMs = zonedDateTimeToUtcMs(item.date, item.end, timezone);
+            const endMs = getExceptionEndMs(item, timezone);
             return !Number.isFinite(endMs) || endMs > now;
         });
     exceptions.sort((a, b) => `${a.item.date} ${a.item.start}`.localeCompare(`${b.item.date} ${b.item.start}`));
@@ -1911,7 +1924,7 @@ function removeExpiredExceptions() {
     const timezone = getTeacherTimezone();
     const active = exceptions.filter((item) => {
         if (!item?.date || !item?.end) return true;
-        const endMs = zonedDateTimeToUtcMs(item.date, item.end, timezone);
+        const endMs = getExceptionEndMs(item, timezone);
         return !Number.isFinite(endMs) || endMs > now;
     });
     const removedCount = exceptions.length - active.length;
