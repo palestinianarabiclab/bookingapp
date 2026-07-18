@@ -480,6 +480,17 @@ main.site-shell {
     transform: none;
 }
 
+.btn--danger {
+    background: #b91c1c;
+    border-color: #b91c1c;
+    color: #fff;
+}
+
+.btn--danger:hover {
+    background: #991b1b;
+    border-color: #991b1b;
+}
+
 .btn__spinner {
     display: none;
     width: 14px;

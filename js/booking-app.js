@@ -126,6 +126,12 @@ function cacheDom() {
         "studentAuthSubmit",
         "studentForgotPasswordBtn",
         "studentLogoutBtn",
+        "studentDeleteAccountBtn",
+        "studentDeleteAccountModal",
+        "studentDeleteAccountForm",
+        "studentDeleteAccountPassword",
+        "studentDeleteAccountConfirmBtn",
+        "studentDeleteAccountMsg",
         "studentAuthMsg",
         "bookingStatusEmail",
         "bookingStatusBtn",
@@ -622,6 +628,9 @@ function updateStudentAuthUi() {
     }
     if (els.studentLogoutBtn) {
         els.studentLogoutBtn.hidden = !signedIn;
+    }
+    if (els.studentDeleteAccountBtn) {
+        els.studentDeleteAccountBtn.hidden = !signedIn;
     }
     updateStudentBalanceUi();
     updateCourseAccessRequestUi();
@@ -1548,6 +1557,65 @@ function wireStudentActions() {
         await withButtonLoading(els.studentLogoutBtn, "Signing out...", () => window.auth.signOut());
     });
 
+    els.studentDeleteAccountBtn?.addEventListener("click", () => {
+        if (!isStudentSignedIn()) return;
+        if (els.studentDeleteAccountPassword) els.studentDeleteAccountPassword.value = "";
+        setStatus(els.studentDeleteAccountMsg, "");
+        els.studentDeleteAccountModal?.classList.add("modal--open");
+        window.setTimeout(() => els.studentDeleteAccountPassword?.focus(), 0);
+    });
+
+    els.studentDeleteAccountForm?.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const user = window.auth?.currentUser;
+        const password = els.studentDeleteAccountPassword?.value || "";
+        if (!user || state.currentRole !== "student") {
+            setStatus(els.studentDeleteAccountMsg, "Please sign in again before deleting your account.", "error");
+            return;
+        }
+        if (!user.email || !password) {
+            setStatus(els.studentDeleteAccountMsg, "Enter your password to continue.", "error");
+            return;
+        }
+
+        const profileBackup = {
+            ...(state.studentProfile || {}),
+            email: state.studentProfile?.email || user.email,
+            role: "student",
+        };
+        let profileDeleted = false;
+        try {
+            setButtonLoading(els.studentDeleteAccountConfirmBtn, true, "Deleting...");
+            setStatus(els.studentDeleteAccountMsg, "Verifying your password...");
+            const credential = window.firebase.auth.EmailAuthProvider.credential(user.email, password);
+            await user.reauthenticateWithCredential(credential);
+
+            stopStudentProfileListener();
+            await window.db.collection("users").doc(user.uid).delete();
+            profileDeleted = true;
+            await user.delete();
+
+            els.studentDeleteAccountModal?.classList.remove("modal--open");
+            if (els.studentDeleteAccountPassword) els.studentDeleteAccountPassword.value = "";
+            showScreen("welcome-screen");
+        } catch (error) {
+            if (profileDeleted && window.auth?.currentUser) {
+                try {
+                    await window.db.collection("users").doc(user.uid).set(profileBackup, { merge: true });
+                    startStudentProfileListener();
+                } catch (restoreError) {
+                    console.error("Could not restore student profile after account deletion failed.", restoreError);
+                }
+            }
+            const message = error?.code === "auth/wrong-password" || error?.code === "auth/invalid-credential"
+                ? "The password is incorrect."
+                : (error?.message || "Could not delete your account. Please try again.");
+            setStatus(els.studentDeleteAccountMsg, message, "error");
+        } finally {
+            setButtonLoading(els.studentDeleteAccountConfirmBtn, false);
+        }
+    });
+
     els.requestCourseAccessBtn?.addEventListener("click", async () => {
         await withButtonLoading(els.requestCourseAccessBtn, "Sending...", requestFullCourseAccess).catch((error) => {
             setStatus(els.courseAccessRequestMsg, error.message || "Could not send access request.", "error");
@@ -1762,6 +1830,14 @@ function wireStudentActions() {
     document.querySelectorAll("[data-close-student-modal]").forEach((button) => {
         button.addEventListener("click", () => {
             els.studentAuthModal?.classList.remove("modal--open");
+        });
+    });
+
+    document.querySelectorAll("[data-close-delete-account-modal]").forEach((button) => {
+        button.addEventListener("click", () => {
+            els.studentDeleteAccountModal?.classList.remove("modal--open");
+            if (els.studentDeleteAccountPassword) els.studentDeleteAccountPassword.value = "";
+            setStatus(els.studentDeleteAccountMsg, "");
         });
     });
 

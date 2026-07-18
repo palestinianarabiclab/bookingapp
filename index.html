@@ -62,6 +62,7 @@
                 </div>
                 <div class="student-session-actions">
                     <a class="btn btn--outline btn--small" href="https://palestinianarabiclab.vercel.app/">Course Materials</a>
+                    <button type="button" class="btn btn--danger btn--small" id="studentDeleteAccountBtn" hidden>Delete Account</button>
                     <button type="button" class="btn btn--ghost btn--small" id="studentLogoutBtn" hidden>Sign Out</button>
                 </div>
             </div>
@@ -714,6 +715,31 @@
             <div class="action-row action-row--end">
                 <button class="btn btn--primary btn--small" data-close-booking-success type="button">Close</button>
             </div>
+        </div>
+    </div>
+
+    <div id="studentDeleteAccountModal" class="modal">
+        <div class="modal__backdrop" data-close-delete-account-modal></div>
+        <div class="modal__body" role="dialog" aria-modal="true" aria-labelledby="studentDeleteAccountTitle">
+            <button class="modal__close" data-close-delete-account-modal type="button">&times;</button>
+            <h3 id="studentDeleteAccountTitle">Delete your account?</h3>
+            <p class="small-note">
+                This permanently deletes your login and student profile. Past bookings remain in the booking history.
+            </p>
+            <form id="studentDeleteAccountForm" class="form-stack">
+                <label class="field">
+                    <span>Confirm your password</span>
+                    <input id="studentDeleteAccountPassword" type="password" autocomplete="current-password" required />
+                </label>
+                <p id="studentDeleteAccountMsg" class="status-line"></p>
+                <div class="action-row action-row--end">
+                    <button class="btn btn--ghost btn--small" data-close-delete-account-modal type="button">Cancel</button>
+                    <button class="btn btn--danger btn--small" id="studentDeleteAccountConfirmBtn" type="submit">
+                        <span class="btn__label">Permanently Delete</span>
+                        <span class="btn__spinner" aria-hidden="true"></span>
+                    </button>
+                </div>
+            </form>
         </div>
     </div>
 
