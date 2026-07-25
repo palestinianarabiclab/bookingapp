@@ -1,3 +1,15 @@
 {
-    "liveServer.settings.port": 5502
+    "liveServer.settings.port": 5502,
+    "files.exclude": {
+        "**/node_modules": true,
+        "**/public": true
+    },
+    "search.exclude": {
+        "**/node_modules": true,
+        "**/public": true
+    },
+    "files.watcherExclude": {
+        "**/node_modules/**": true,
+        "**/public/**": true
+    }
 }

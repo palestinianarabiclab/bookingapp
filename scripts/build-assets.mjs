@@ -1,31 +1,52 @@
-import { readdirSync, statSync, readFileSync } from "node:fs";
+import {
+    copyFileSync,
+    cpSync,
+    existsSync,
+    mkdirSync,
+    rmSync,
+    statSync,
+} from "node:fs";
 import { join } from "node:path";
 
-console.log("⚡ Checking asset bundle statistics...");
-
 const rootDir = process.cwd();
-const targetFiles = [
+const outputDir = join(rootDir, "public");
+const publicFiles = [
     "index.html",
     "styles.css",
-    "js/booking-app.js",
-    "js/google-calendar.js",
-    "js/apps-script-sync.js"
+    "robots.txt",
+    "sitemap.xml",
+    "llms.txt",
+    "metadata.json",
+];
+const publicDirectories = ["assets", "js"];
+
+rmSync(outputDir, { recursive: true, force: true });
+mkdirSync(outputDir, { recursive: true });
+
+for (const relativePath of publicFiles) {
+    const source = join(rootDir, relativePath);
+    if (!existsSync(source)) continue;
+    copyFileSync(source, join(outputDir, relativePath));
+}
+
+for (const relativePath of publicDirectories) {
+    const source = join(rootDir, relativePath);
+    if (!existsSync(source)) continue;
+    cpSync(source, join(outputDir, relativePath), { recursive: true });
+}
+
+const requiredFiles = [
+    "index.html",
+    "styles.css",
+    "js/app.js",
+    "js/firebase-bootstrap.js",
 ];
 
-let totalSizeBytes = 0;
-
-for (const relativePath of targetFiles) {
-    try {
-        const fullPath = join(rootDir, relativePath);
-        const stats = statSync(fullPath);
-        const sizeKb = (stats.size / 1024).toFixed(2);
-        totalSizeBytes += stats.size;
-        console.log(`  - ${relativePath.padEnd(25)} : ${sizeKb} KB`);
-    } catch (err) {
-        console.warn(`  - Warning: Could not read ${relativePath}: ${err.message}`);
+for (const relativePath of requiredFiles) {
+    const outputPath = join(outputDir, relativePath);
+    if (!existsSync(outputPath) || !statSync(outputPath).isFile()) {
+        throw new Error(`Missing required build output: ${relativePath}`);
     }
 }
 
-const totalKb = (totalSizeBytes / 1024).toFixed(2);
-console.log(`\n Total Core Assets Size: ${totalKb} KB`);
-console.log(" Asset verification complete.");
+console.log(`Static deployment created at ${outputDir}`);
