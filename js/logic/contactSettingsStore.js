@@ -3,6 +3,7 @@ export function createInitialContactSettings() {
         whatsapp: "",
         email: "",
         sitePrice: "",
+        classroomMeetingUrl: "",
     };
 }
 
@@ -47,6 +48,7 @@ export async function loadContactSettingsFromCloud(db, currentSettings) {
                     whatsapp: typeof data.whatsapp === "string" ? data.whatsapp : currentSettings.whatsapp,
                     email: typeof data.email === "string" ? data.email : currentSettings.email,
                     sitePrice: typeof data.sitePrice === "string" ? data.sitePrice : currentSettings.sitePrice,
+                    classroomMeetingUrl: typeof data.classroomMeetingUrl === "string" ? data.classroomMeetingUrl : currentSettings.classroomMeetingUrl,
                 };
             }
         }
@@ -59,6 +61,7 @@ export async function loadContactSettingsFromCloud(db, currentSettings) {
                 whatsapp: typeof data.whatsapp === "string" ? data.whatsapp : currentSettings.whatsapp,
                 email: typeof data.contactEmail === "string" ? data.contactEmail : currentSettings.email,
                 sitePrice: typeof data.sitePrice === "string" ? data.sitePrice : currentSettings.sitePrice,
+                classroomMeetingUrl: typeof data.classroomMeetingUrl === "string" ? data.classroomMeetingUrl : currentSettings.classroomMeetingUrl,
             };
         }
     } catch {}
@@ -76,6 +79,7 @@ export async function saveContactSettingsToCloud(db, firebase, settings) {
                         whatsapp: settings?.whatsapp || "",
                         email: settings?.email || "",
                         sitePrice: settings?.sitePrice || "",
+                        classroomMeetingUrl: settings?.classroomMeetingUrl || "",
                         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
                     },
                 },
@@ -89,6 +93,7 @@ export async function saveContactSettingsToCloud(db, firebase, settings) {
                 whatsapp: settings?.whatsapp || "",
                 contactEmail: settings?.email || "",
                 sitePrice: settings?.sitePrice || "",
+                classroomMeetingUrl: settings?.classroomMeetingUrl || "",
                 updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
             },
             { merge: true }

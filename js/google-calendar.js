@@ -370,7 +370,7 @@ async function connectToGoogleCalendar(callback) {
             const ok = await errorHandler.withTimeout(
                 () => initializeGoogleCalendar(),
                 10000,
-                'فشل تهيئة Google Calendar API - انتهت المهلة'
+                'Failed to initialize Google Calendar API - Timeout'
             );
             console.log("Google Calendar API initialized successfully");
         } catch (error) {
@@ -617,15 +617,17 @@ window.importGoogleCalendarEventsToBusyBlocks = async function importGoogleCalen
             }
         }
         
-        const nextBookingSettings = { ...teacherBookingSettings, exceptions };
+        const syncTime = Date.now();
+        const nextBookingSettings = { ...teacherBookingSettings, exceptions, lastGoogleSync: syncTime };
         await Promise.all([
             bookingRef.set({ bookingSettings: nextBookingSettings }, { merge: true }),
             firebase.firestore().collection("bookingSettings").doc("primary").set({
                 exceptions,
-                updatedAt: Date.now()
+                updatedAt: syncTime,
+                lastGoogleSync: syncTime
             }, { merge: true })
         ]);
-        window.bookingSettings = { ...window.bookingSettings, exceptions };
+        window.bookingSettings = { ...window.bookingSettings, exceptions, lastGoogleSync: syncTime };
         
         console.log(`Imported ${addedCount} events, skipped ${skippedCount} existing events`);
         return { 

@@ -2,6 +2,15 @@
   "timeZone": "Africa/Cairo",
   "exceptionLogging": "STACKDRIVER",
   "runtimeVersion": "V8",
+  "dependencies": {
+    "enabledAdvancedServices": [
+      {
+        "userSymbol": "Calendar",
+        "version": "v3",
+        "serviceId": "calendar"
+      }
+    ]
+  },
   "oauthScopes": [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/script.send_mail",

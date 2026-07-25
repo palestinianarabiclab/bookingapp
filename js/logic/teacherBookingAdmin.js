@@ -9,14 +9,15 @@ export async function renderTeacherBookings({
     teacherBookingList.innerHTML = "<div class=\"small-note\">Loading bookings...</div>";
     bookingCache.clear();
     try {
-        const now = Date.now() - 3600000;
+        const managementStart = Date.now() - 3600000;
+        const calendarHistoryStart = Date.now() - 60 * 24 * 60 * 60 * 1000;
         let snap;
         try {
             snap = await db
                 .collection("bookings")
-                .where("slot", ">=", now)
+                .where("slot", ">=", calendarHistoryStart)
                 .orderBy("slot")
-                .limit(200)
+                .limit(100)
                 .get();
         } catch (queryError) {
             const code = queryError?.code || "";
@@ -28,23 +29,26 @@ export async function renderTeacherBookings({
             snap = await db
                 .collection("bookings")
                 .orderBy("slot")
-                .limit(400)
+                .limit(100)
                 .get();
         }
         const items = [];
         snap.forEach((doc) => {
             const data = doc.data();
             if (!data || !data.slot) return;
-            if (data.slot < now) return;
+            if (data.slot < calendarHistoryStart) return;
             items.push({ id: doc.id, ...data });
         });
-        if (!items.length) {
+        items.forEach((booking) => {
+            bookingCache.set(booking.id, booking);
+        });
+        const managementItems = items.filter((booking) => Number(booking.slot || 0) >= managementStart);
+        if (!managementItems.length) {
             teacherBookingList.innerHTML = "<div class=\"small-note\">No upcoming bookings.</div>";
             return bookingCache;
         }
-        teacherBookingList.innerHTML = items
+        teacherBookingList.innerHTML = managementItems
             .map((b) => {
-                bookingCache.set(b.id, b);
                 b = {
                     ...b,
                     name: escapeHtml(b.name || "Student"),
@@ -66,6 +70,15 @@ export async function renderTeacherBookings({
                 const rescheduledFrom = b.rescheduledFrom
                     ? `<div class="booking-item__meta">From: ${escapeHtml(formatSlotTime(b.rescheduledFrom))}</div>`
                     : "";
+                const cutoffMs = 12 * 60 * 60 * 1000;
+                const isLateCancel = (status !== "canceled" && status !== "completed") && (Number(b.slot || 0) - Date.now() < cutoffMs);
+                const deadlineMs = Number(b.slot || 0) - cutoffMs;
+                const formattedDeadline = formatSlotTime(deadlineMs);
+                const lateLabel = isLateCancel
+                    ? `<div style="font-size: 0.72rem; color: #991b1b; background: #fef2f2; border: 1px solid #fee2e2; padding: 4px 8px; border-radius: 4px; margin-top: 6px; line-height: 1.3; font-weight: 500;">⚠️ Within 12h Late-Cancellation Window<br><span style="font-size: 0.68rem; opacity: 0.85;">Deadline passed on ${escapeHtml(formattedDeadline)}</span></div>`
+                    : (status !== "canceled" && status !== "completed") 
+                        ? `<div style="font-size: 0.72rem; color: #166534; background: #f0fdf4; border: 1px solid #dcfce7; padding: 4px 8px; border-radius: 4px; margin-top: 6px; line-height: 1.3;">🕒 Reschedule Deadline: <strong>${escapeHtml(formattedDeadline)}</strong></div>`
+                        : "";
                 return `
                     <div class="booking-item" data-booking-id="${b.id}">
                         <div class="booking-item__main">
@@ -74,8 +87,11 @@ export async function renderTeacherBookings({
                             <div class="booking-item__time">${escapeHtml(formatSlotTime(b.slot))}</div>
                             ${rescheduledFrom}
                             <div class="${statusClass}">${escapeHtml(statusLabel)}</div>
+                            ${lateLabel}
                         </div>
-                        <div class="booking-item__actions">
+                        <div class="booking-item__actions" style="display: flex; flex-wrap: wrap; gap: 6px;">
+                            <button class="btn btn--primary btn--small" data-action="classroom" data-booking-id="${b.id}">🎓 Enter Classroom / Video Call</button>
+                            <button class="btn btn--ghost btn--small" data-action="complete" data-booking-id="${b.id}" ${status === "completed" || status === "canceled" ? "disabled" : ""}>✅ Completed</button>
                             <button class="btn btn--ghost btn--small" data-action="cancel" ${status === "canceled" ? "disabled" : ""}>Cancel</button>
                             <button class="btn btn--outline btn--small" data-action="reschedule" ${status === "canceled" ? "disabled" : ""}>Reschedule</button>
                         </div>
@@ -124,27 +140,46 @@ export async function openReschedulePanel({
 }
 
 export async function cancelBooking({ db, firebase, bookingId }) {
-    await db.collection("bookings").doc(bookingId).set(
+    const bookingSnap = await db.collection("bookings").doc(bookingId).get();
+    if (!bookingSnap.exists) throw new Error("Booking was not found.");
+    const booking = bookingSnap.data() || {};
+    const canceledAt = Date.now();
+    const batch = db.batch();
+    batch.set(
+        db.collection("bookings").doc(bookingId),
         {
             status: "canceled",
             calendarSynced: false,
-            canceledAt: Date.now(),
+            calendarDeletePending: true,
+            updatedAt: canceledAt,
+            canceledAt,
+            canceledBy: "teacher",
             history: firebase.firestore.FieldValue.arrayUnion({
-                at: Date.now(),
+                at: canceledAt,
                 action: "canceled",
                 by: "teacher",
             }),
         },
         { merge: true }
     );
-    await db.collection("publicBookings").doc(bookingId).set(
+    batch.set(
+        db.collection("publicBookings").doc(bookingId),
         {
             status: "canceled",
-            updatedAt: Date.now(),
+            updatedAt: canceledAt,
             calendarSynced: false,
         },
         { merge: true }
     );
+    if (booking.isFreeTrial === true && booking.studentUid) {
+        batch.set(db.collection("users").doc(booking.studentUid), {
+            trialUsed: false,
+            trialUsedAt: firebase.firestore.FieldValue.delete(),
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        batch.delete(db.collection("trialClaims").doc(booking.studentUid));
+    }
+    await batch.commit();
 }
 
 export async function rescheduleBooking({
@@ -155,8 +190,11 @@ export async function rescheduleBooking({
     newSlot,
     calendarSynced = false,
     googleCalendarEventId = null,
+    meetingUrl = "",
 }) {
-    await db.collection("bookings").doc(bookingId).set(
+    const batch = db.batch();
+    batch.set(
+        db.collection("bookings").doc(bookingId),
         {
             slot: newSlot,
             status: "rescheduled",
@@ -164,6 +202,9 @@ export async function rescheduleBooking({
             rescheduledAt: Date.now(),
             calendarSynced,
             googleCalendarEventId,
+            meetingUrl,
+            studentNotice: "Your teacher changed the lesson time. Please review the updated schedule.",
+            studentNoticeAt: Date.now(),
             history: firebase.firestore.FieldValue.arrayUnion({
                 at: Date.now(),
                 action: "rescheduled",
@@ -174,7 +215,8 @@ export async function rescheduleBooking({
         },
         { merge: true }
     );
-    await db.collection("publicBookings").doc(bookingId).set(
+    batch.set(
+        db.collection("publicBookings").doc(bookingId),
         {
             slot: newSlot,
             status: "rescheduled",
@@ -183,6 +225,44 @@ export async function rescheduleBooking({
         },
         { merge: true }
     );
+    await batch.commit();
+}
+
+export async function resizeBookingDuration({
+    db,
+    firebase,
+    bookingId,
+    booking,
+    durationMinutes,
+}) {
+    const updatedAt = Date.now();
+    const batch = db.batch();
+    batch.set(
+        db.collection("bookings").doc(bookingId),
+        {
+            durationMinutes,
+            updatedAt,
+            studentNotice: `Your teacher changed the lesson duration to ${durationMinutes} minutes.`,
+            studentNoticeAt: updatedAt,
+            history: firebase.firestore.FieldValue.arrayUnion({
+                at: updatedAt,
+                action: "duration_changed",
+                by: "teacher",
+                from: Number(booking.durationMinutes || booking.slotMinutes || 50),
+                to: durationMinutes,
+            }),
+        },
+        { merge: true }
+    );
+    batch.set(
+        db.collection("publicBookings").doc(bookingId),
+        {
+            durationMinutes,
+            updatedAt,
+        },
+        { merge: true }
+    );
+    await batch.commit();
 }
 
 export async function clearAllBookings({ db }) {

@@ -41,12 +41,6 @@ In Apps Script:
 `FIREBASE_PROJECT_ID`
 : for this app, use `farouqapp-7ea93`.
 
-`FIREBASE_TEACHER_EMAIL`
-: the teacher login email.
-
-`FIREBASE_TEACHER_PASSWORD`
-: the teacher login password. Apps Script uses this only to sign in to Firebase and deduct balances in the background.
-
 ## 3. Deploy as Web App
 
 1. Click `Deploy`
@@ -110,19 +104,9 @@ It does not charge:
 
 To enable it:
 
-1. Add the Firebase script properties listed above.
-2. Deploy the latest `apps-script/booking-sync.gs`.
-3. In Apps Script, open `Triggers` from the left sidebar.
-4. Click `Add Trigger`.
-5. Choose function: `reconcileStudentBalancesFromFirestore`.
-6. Event source: `Time-driven`.
-7. Type: `Minutes timer`.
-8. Interval: `Every 5 minutes`.
-9. Save and approve Google permissions.
+Balance deductions run from the authenticated teacher dashboard. No Firebase teacher email or password is stored in Apps Script.
 
 To test manually, open the teacher dashboard and click `Check Balance Deductions`.
-
-Important: if you change the teacher password in Firebase, update `FIREBASE_TEACHER_PASSWORD` in Apps Script properties too.
 
 ## 7. Optional
 

@@ -31,11 +31,17 @@ export function createInitialBookingSettings() {
         days: defaultDays(),
         exceptions: [],
         courseOffers: {
-            courseAccessPrice: 15,
+            courseAccessPrice: 10,
             courseAccessUnits: 15,
             freeTrialLessons: 1,
-            paypalPaymentLink: "",
+            paypalPaymentLink: "https://paypal.me/mahmoudtafesh2007",
             paypalReminder: "Just a quick reminder: when you choose to pay through PayPal, please choose Goods and Services. Choosing another option may affect my PayPal account.",
+            packages: [
+                { id: "pkg-1", lessons: 1, price: 10, badge: "Single Lesson", popular: false },
+                { id: "pkg-5", lessons: 5, price: 48, badge: "Starter Pack", popular: false },
+                { id: "pkg-10", lessons: 10, price: 90, badge: "POPULAR", popular: true },
+                { id: "pkg-20", lessons: 20, price: 170, badge: "Best Value", popular: false },
+            ]
         },
     };
 }
@@ -68,6 +74,14 @@ export function ensureBookingSettingsShape(settings) {
         ...base.courseOffers,
         ...(next.courseOffers || {}),
     };
+    if (!Array.isArray(next.courseOffers.packages)) {
+        next.courseOffers.packages = [
+            { id: "pkg-1", lessons: 1, price: 10, badge: "Single Lesson", popular: false },
+            { id: "pkg-5", lessons: 5, price: 48, badge: "Starter Pack", popular: false },
+            { id: "pkg-10", lessons: 10, price: 90, badge: "POPULAR", popular: true },
+            { id: "pkg-20", lessons: 20, price: 170, badge: "Best Value", popular: false },
+        ];
+    }
     return next;
 }
 
