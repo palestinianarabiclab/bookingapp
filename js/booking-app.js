@@ -1585,11 +1585,10 @@ function renderUpcomingLessonBanner(bookings) {
         if (status === "canceled" || status === "completed") return false;
         
         const slotStart = Number(b.slot || 0);
-        const slotEnd = slotStart + 50 * 60 * 1000; // 50 mins duration
-        const accessState = getLessonAccessState(slotStart, now);
+        const slotEnd = slotStart + Number(b.durationMinutes || 50) * 60 * 1000;
         
         // Show if active now or starting in less than 15 hours
-        if (now >= slotStart && accessState.canEnter) return true;
+        if (now >= slotStart && now < slotEnd) return true;
         if (slotStart > now && (slotStart - now) <= 15 * 60 * 60 * 1000) return true;
         
         return false;
@@ -1605,12 +1604,16 @@ function renderUpcomingLessonBanner(bookings) {
     activeAndFuture.sort((a, b) => Number(a.slot) - Number(b.slot));
     const nextBooking = activeAndFuture[0];
     const slotStart = Number(nextBooking.slot);
-    const slotEnd = slotStart + 50 * 60 * 1000;
+    const slotEnd = slotStart + Number(nextBooking.durationMinutes || 50) * 60 * 1000;
 
     bannerEl.style.display = "block";
 
     const updateBannerContent = () => {
         const currentNow = Date.now();
+        if (currentNow >= slotEnd) {
+            renderUpcomingLessonBanner(bookings);
+            return;
+        }
         const isLive = currentNow >= slotStart && currentNow < slotEnd;
         const accessState = getLessonAccessState(slotStart, currentNow);
         let titleHtml = "";
@@ -4725,7 +4728,7 @@ function renderTeacherUpcomingLessonBanner() {
     }
 
     const now = Date.now();
-    const cutoffMs = 12 * 60 * 60 * 1000; // 12 hours window
+    const cutoffMs = 15 * 60 * 60 * 1000;
 
     const activeAndFuture = bookings.filter((b) => {
         const status = (b.status || "").toLowerCase();
@@ -4733,11 +4736,9 @@ function renderTeacherUpcomingLessonBanner() {
 
         const slotStart = Number(b.slot || b.timeSlot || 0);
         if (!slotStart) return false;
-        const slotEnd = slotStart + 50 * 60 * 1000; // 50 mins duration
-        const accessState = getLessonAccessState(slotStart, now);
+        const slotEnd = slotStart + Number(b.durationMinutes || 50) * 60 * 1000;
 
-        // Show if active now or starting in less than 12 hours
-        if (now >= slotStart && accessState.canEnter) return true;
+        if (now >= slotStart && now < slotEnd) return true;
         if (slotStart > now && (slotStart - now) <= cutoffMs) return true;
 
         return false;
@@ -4753,12 +4754,16 @@ function renderTeacherUpcomingLessonBanner() {
     activeAndFuture.sort((a, b) => Number(a.slot || a.timeSlot || 0) - Number(b.slot || b.timeSlot || 0));
     const nextBooking = activeAndFuture[0];
     const slotStart = Number(nextBooking.slot || nextBooking.timeSlot);
-    const slotEnd = slotStart + 50 * 60 * 1000;
+    const slotEnd = slotStart + Number(nextBooking.durationMinutes || 50) * 60 * 1000;
 
     bannerEl.style.display = "block";
 
     const updateBannerContent = () => {
         const currentNow = Date.now();
+        if (currentNow >= slotEnd) {
+            renderTeacherUpcomingLessonBanner();
+            return;
+        }
         const isLive = currentNow >= slotStart && currentNow < slotEnd;
         const accessState = getLessonAccessState(slotStart, currentNow);
         let countdownText = "";
