@@ -48,7 +48,7 @@ import {
     loadCloudReviews,
     addReviewToCloud,
     deleteReviewFromCloud,
-} from "./logic/profileAndReviewsStore.js";
+} from "./logic/profileAndReviewsStore.js?v=20260726-review-order-v1";
 
 const DAY_KEYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const DEFAULT_TIMEZONE = "Africa/Cairo";
@@ -2222,6 +2222,25 @@ function stopTeacherLessonFeedbackListener() {
 
 function startTeacherLessonFeedbackListener() {
     stopTeacherLessonFeedbackListener();
+    if (!window.db || !state.teacherUser || state.teacherRole !== "teacher") return;
+    state.teacherLessonFeedbackUnsubscribe = window.db
+        .collection("lessonFeedback")
+        .orderBy("createdAt", "desc")
+        .limit(100)
+        .onSnapshot(
+            () => {
+                if (state.teacherLessonFeedbackRefreshTimer) {
+                    window.clearTimeout(state.teacherLessonFeedbackRefreshTimer);
+                }
+                state.teacherLessonFeedbackRefreshTimer = window.setTimeout(() => {
+                    state.teacherLessonFeedbackRefreshTimer = null;
+                    refreshTeacherLessonFeedback().catch((error) => {
+                        console.warn("Could not refresh lesson feedback statistics.", error);
+                    });
+                }, 250);
+            },
+            (error) => console.warn("Could not watch lesson feedback updates.", error)
+        );
 }
 
 function stopStudentBookingsListener() {
@@ -3235,7 +3254,38 @@ function listenWhiteboardFromCloud(bookingId) {
     });
 }
 
-function openClassroomDirectly(booking) {
+async function recoverClassroomMeetingUrl(booking) {
+    if (!booking?.id || !booking?.slot || typeof window.createBookingViaAppsScript !== "function") return "";
+    const result = await window.createBookingViaAppsScript({
+        bookingId: booking.id,
+        slot: booking.slot,
+        durationMinutes: booking.durationMinutes || booking.slotMinutes || state.bookingSettings?.slotMinutes || 50,
+        timeZone: booking.timezone || state.bookingSettings?.timezone || getLocalTimezone(),
+        name: booking.name || "",
+        email: booking.email || "",
+        phone: booking.phone || "",
+        notes: booking.notes || "",
+    });
+    const meetingUrl = normalizeMeetingUrl(result?.meetingUrl);
+    if (!result?.success || !meetingUrl) return "";
+    if (window.db) {
+        await window.db.collection("bookings").doc(booking.id).set({
+            calendarSynced: true,
+            googleCalendarEventId: result.eventId || booking.googleCalendarEventId || null,
+            meetingUrl,
+            updatedAt: Date.now(),
+            history: window.firebase.firestore.FieldValue.arrayUnion({
+                at: Date.now(),
+                action: "meeting-link-recovered",
+                by: "system",
+            }),
+        }, { merge: true });
+    }
+    booking.meetingUrl = meetingUrl;
+    return meetingUrl;
+}
+
+async function openClassroomDirectly(booking) {
     const accessState = getLessonAccessState(booking?.slot);
     if (!accessState.canEnter) {
         const message = accessState.reason === "too-early"
@@ -3244,10 +3294,18 @@ function openClassroomDirectly(booking) {
         window.alert(message);
         return;
     }
-    const url = getClassroomMeetingUrl(booking);
+    let url = getClassroomMeetingUrl(booking);
     if (!url) {
-        window.alert("Google Meet link is not available for this lesson. New bookings create it automatically.");
-        return;
+        setAppLoading(true, "Preparing your Google Meet room...");
+        try {
+            url = await recoverClassroomMeetingUrl(booking);
+        } finally {
+            setAppLoading(false);
+        }
+        if (!url) {
+            window.alert("The Google Meet room could not be prepared. Ask the teacher to sync this booking from the calendar settings.");
+            return;
+        }
     }
     window.location.assign(url);
 }
@@ -4981,6 +5039,8 @@ function renderPreplyStatisticsSummary(statistics = {}) {
             <strong>Preply automatic statistics active</strong>
             <span>${Number(statistics.processedEventIds?.length || 0)} completed calendar lessons tracked</span>
             <span>${Number(statistics.knownStudentKeys?.length || 0)} unique calendar students recognized</span>
+            <span>${Number(statistics.processedPlatformBookingIds?.length || 0)} completed platform lessons tracked</span>
+            <span>${Number(statistics.knownPlatformStudentKeys?.length || 0)} unique platform students recognized</span>
             <small>Last sync: ${statistics.lastSyncedAt ? escapeHtml(new Date(statistics.lastSyncedAt).toLocaleString()) : "Not synced yet"}</small>
         `
         : `
@@ -5043,6 +5103,76 @@ async function syncPreplyStatistics() {
     return {
         firstSync,
         newLessons: newEventIds.length,
+        newStudents: newStudentKeys.length,
+    };
+}
+
+async function syncPlatformStatistics() {
+    if (!state.teacherUser || state.teacherRole !== "teacher" || !window.db) return null;
+    const bookings = state.bookingCache instanceof Map
+        ? Array.from(state.bookingCache.entries()).map(([id, booking]) => ({ id, ...(booking || {}) }))
+        : [];
+    const now = Date.now();
+    const completed = bookings.filter((booking) => {
+        const status = String(booking.status || "booked").toLowerCase();
+        const slot = Number(booking.slot || booking.timeSlot || 0);
+        const durationMinutes = Number(booking.durationMinutes || booking.slotMinutes || 50);
+        return booking.id && status !== "canceled" && slot > 0 && slot + durationMinutes * 60000 <= now;
+    });
+    const completedIds = completed.map((booking) => String(booking.id));
+    const studentKeys = Array.from(new Set(completed.map((booking) => String(
+        booking.studentUid || booking.email || booking.studentEmail || booking.name || ""
+    ).trim().toLowerCase()).filter(Boolean)));
+
+    const teacherRef = window.db.collection("teachers").doc(state.teacherUser.uid);
+    const teacherSnap = await teacherRef.get();
+    const teacherData = teacherSnap.exists ? (teacherSnap.data() || {}) : {};
+    const previous = teacherData.calendarStatistics || {};
+    const platformInitialized = previous.platformInitialized === true;
+    const knownLessonIds = new Set(Array.isArray(previous.processedPlatformBookingIds)
+        ? previous.processedPlatformBookingIds.map(String)
+        : []);
+    const knownStudentKeys = new Set(Array.isArray(previous.knownPlatformStudentKeys)
+        ? previous.knownPlatformStudentKeys.map(String)
+        : []);
+    const newLessonIds = platformInitialized
+        ? completedIds.filter((id) => !knownLessonIds.has(id))
+        : [];
+    const newStudentKeys = platformInitialized
+        ? studentKeys.filter((key) => !knownStudentKeys.has(key))
+        : [];
+    const syncedAt = Date.now();
+    const calendarStatistics = {
+        ...previous,
+        platformInitialized: true,
+        processedPlatformBookingIds: Array.from(new Set([...knownLessonIds, ...completedIds])).slice(-5000),
+        knownPlatformStudentKeys: Array.from(new Set([...knownStudentKeys, ...studentKeys])).slice(-5000),
+        platformLessonsAdded: Number(previous.platformLessonsAdded || 0) + newLessonIds.length,
+        platformStudentsAdded: Number(previous.platformStudentsAdded || 0) + newStudentKeys.length,
+        lastPlatformLessonCount: completedIds.length,
+        lastPlatformStudentCount: studentKeys.length,
+        lastPlatformSyncedAt: syncedAt,
+    };
+    await teacherRef.set({ calendarStatistics, updatedAt: syncedAt }, { merge: true });
+
+    if (newLessonIds.length || newStudentKeys.length) {
+        const currentLessons = parseProfileCounter(state.profileSettings?.hoursTaught, 1200);
+        const currentStudents = parseProfileCounter(state.profileSettings?.studentsCount, 85);
+        state.profileSettings = {
+            ...state.profileSettings,
+            hoursTaught: `${currentLessons + newLessonIds.length}+`,
+            studentsCount: `${currentStudents + newStudentKeys.length}+`,
+            platformStatsUpdatedAt: syncedAt,
+        };
+        await saveCloudProfileSettings(window.db, state.profileSettings);
+        saveLocalProfileSettings("teacher_profile_v1", state.profileSettings);
+        renderProfileUi();
+        updateTeacherOverviewStats();
+    }
+    renderPreplyStatisticsSummary(calendarStatistics);
+    return {
+        firstSync: !platformInitialized,
+        newLessons: newLessonIds.length,
         newStudents: newStudentKeys.length,
     };
 }
@@ -5140,6 +5270,9 @@ async function refreshTeacherBookings() {
         bookingCache: state.bookingCache,
         escapeHtml,
         formatSlotTime,
+    });
+    await syncPlatformStatistics().catch((error) => {
+        console.warn("Automatic platform statistics sync failed.", error);
     });
     renderTeacherWeekCalendar();
 }
@@ -5450,6 +5583,8 @@ function startBalanceReconcileAutoRefresh() {
                     setStatus(els.teacherStudentsMsg, `Deducted ${result.chargedCount} due lesson charge${result.chargedCount === 1 ? "" : "s"}.`, "success");
                     await refreshTeacherStudents();
                     await refreshTeacherBookings();
+                } else {
+                    await syncPlatformStatistics();
                 }
             })
             .catch(console.error);
@@ -7323,7 +7458,7 @@ async function syncReviewsToCloud() {
                 tag: (r.tag || "Arabic Lesson").trim(),
                 avatar: (r.avatar || (r.name ? r.name.substring(0, 2).toUpperCase() : "ST")).trim(),
                 source: r.source || "",
-                createdAt: r.createdAt || Date.now()
+                createdAt: r.createdAt || Date.parse(r.date || "") || 0
             };
         });
 
@@ -7415,12 +7550,25 @@ async function init() {
                 tag: (r.tag || "Arabic Lesson").trim(),
                 avatar: (r.avatar || (r.name ? r.name.substring(0, 2).toUpperCase() : "ST")).trim(),
                 source: r.source || "",
-                createdAt: r.createdAt || Date.now()
+                createdAt: r.createdAt || Date.parse(r.date || "") || 0
             };
         });
 
         // Filter out old Preply reviews
         let filteredRevs = (cloudRevs || []).filter(r => !["rev-preply-1", "rev-preply-2", "rev-preply-3"].includes(r.id));
+
+        const canonicalReviews = new Map(cleanedInitialRevs.map((review) => [review.id, review]));
+        filteredRevs = filteredRevs.map((review) => {
+            const canonical = canonicalReviews.get(review.id);
+            if (!canonical) return review;
+            return {
+                ...review,
+                name: canonical.name,
+                country: canonical.country,
+                date: canonical.date,
+                createdAt: canonical.createdAt,
+            };
+        });
 
         const cloudIds = new Set(filteredRevs.map(r => r.id));
         for (const r of cleanedInitialRevs) {

@@ -709,6 +709,44 @@ function findBookingEvent_(cal, eventId, bookingId, slot) {
   return null;
 }
 
+function ensureBookingMeetingLink_(config, bookingId, slot) {
+  if (!bookingId || !slot) return { eventId: '', meetingUrl: '' };
+  const center = new Date(Number(slot));
+  const options = {
+    timeMin: new Date(center.getTime() - 24 * 60 * 60 * 1000).toISOString(),
+    timeMax: new Date(center.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+    q: 'Booking ID: ' + bookingId,
+    singleEvents: true,
+    maxResults: 20,
+  };
+  const response = Calendar.Events.list(config.primaryCalendarId, options);
+  const items = (response && response.items) || [];
+  const needle = 'Booking ID: ' + bookingId;
+  const apiEvent = items.filter(function (item) {
+    return String(item.description || '').indexOf(needle) !== -1;
+  })[0];
+  if (!apiEvent) return { eventId: '', meetingUrl: '' };
+  if (apiEvent.hangoutLink) {
+    return { eventId: apiEvent.id || apiEvent.iCalUID || '', meetingUrl: apiEvent.hangoutLink };
+  }
+  const patched = Calendar.Events.patch({
+    conferenceData: {
+      createRequest: {
+        requestId: 'recover-' + bookingId + '-' + Date.now(),
+        conferenceSolutionKey: { type: 'hangoutsMeet' }
+      }
+    }
+  }, config.primaryCalendarId, apiEvent.id, {
+    conferenceDataVersion: 1,
+    sendUpdates: 'all'
+  });
+  const meetingUrl = patched.hangoutLink ||
+    ((((patched.conferenceData || {}).entryPoints || []).filter(function (entry) {
+      return entry.entryPointType === 'video';
+    })[0] || {}).uri || '');
+  return { eventId: patched.id || patched.iCalUID || apiEvent.id || '', meetingUrl: meetingUrl };
+}
+
 function buildBusyBlocks_(events, timeZone, includeTitles) {
   return events
     .slice()
@@ -965,11 +1003,17 @@ function handleRequest_(e) {
           try {
             existingMeetingUrl = existingEvent.getHangoutLink() || '';
           } catch (hangoutErr) {}
+          let recoveredMeeting = { eventId: existingEvent.getId(), meetingUrl: existingMeetingUrl };
+          if (!existingMeetingUrl) {
+            recoveredMeeting = ensureBookingMeetingLink_(config, bookingId, slot);
+          }
           return jsonOut({
             success: true,
-            message: 'Booking already exists in Google Calendar.',
-            eventId: existingEvent.getId(),
-            meetingUrl: existingMeetingUrl,
+            message: recoveredMeeting.meetingUrl
+              ? 'Booking exists in Google Calendar and its Meet link is ready.'
+              : 'Booking exists in Google Calendar, but a Meet link could not be created.',
+            eventId: recoveredMeeting.eventId || existingEvent.getId(),
+            meetingUrl: recoveredMeeting.meetingUrl || '',
             calendarInviteSent: false,
             notificationSent: false,
             studentConfirmationSent: false,

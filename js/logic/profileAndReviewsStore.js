@@ -30,7 +30,7 @@ export function createInitialReviews() {
         {
             id: "rev-preply-new-2",
             name: "Antonio",
-            country: "🇮🇹 Italy",
+            country: "🇺🇸 United States",
             date: "May 7, 2026",
             rating: 5,
             text: "Farouq is an amazing teacher! He is very adaptive and patient, quickly adjusting to your needs and pointing out where you are confused the most. He’s a great investigator in that way. I’ve tried a few tutors on Preply but farouq keeps me coming back !",
@@ -85,7 +85,7 @@ export function createInitialReviews() {
         {
             id: "rev-preply-new-7",
             name: "Laura",
-            country: "🇪🇸 Spain",
+            country: "🇫🇷 France",
             date: "March 3, 2026",
             rating: 5,
             text: "Farouq is a great teacher, he is very kind and patient, and adapts the learning to my rhythm and needs. I am improving my Arabic very fast thanks to his support. I highly recommend taking lessons with him!",
@@ -96,7 +96,7 @@ export function createInitialReviews() {
         {
             id: "rev-preply-new-8",
             name: "Naeem",
-            country: "🇸🇦 Saudi Arabia",
+            country: "🇩🇪 Germany",
             date: "February 27, 2026",
             rating: 5,
             text: "good teaching strategy",
@@ -118,7 +118,7 @@ export function createInitialReviews() {
         {
             id: "rev-preply-new-10",
             name: "Ibrahim",
-            country: "🇨🇦 Canada",
+            country: "🇬🇧 United Kingdom",
             date: "January 6, 2026",
             rating: 5,
             text: "Excellent teacher. Farouq is very knowledgeable and understands the student's needs. He tailors the lessons to the students level and ensures you leave with no doubts. I highly recommend him",
@@ -129,7 +129,7 @@ export function createInitialReviews() {
         {
             id: "rev-preply-new-11",
             name: "Carlo",
-            country: "🇮🇹 Italy",
+            country: "🇨🇦 Canada",
             date: "January 4, 2026",
             rating: 5,
             text: "Farouq is such a great tutor. he makes sure you have understanding before moving to topic. He is friendly, communicates very well in English. he has been very helpful to me and I strongly recommend him. Do not hesitate to work with him.",
@@ -140,7 +140,7 @@ export function createInitialReviews() {
         {
             id: "rev-preply-new-12",
             name: "Vin",
-            country: "🇸🇬 Singapore",
+            country: "🇮🇳 India",
             date: "December 29, 2025",
             rating: 5,
             text: "Of the many instructors I have engaged over Preply, Farouq has been a very unique find. He comes very well-prepared for classes with his own tools, including an App that he has built himself (very unique among all the teachers here) that establish learning continuity while making the whole experience a very fun and engaging experience. I STRONGLY RECOMMEND Farouq for those looking for proficient and professional teacher who makes the whole learning process fun and enjoyable!",
