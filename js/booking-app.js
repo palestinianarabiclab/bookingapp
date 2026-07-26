@@ -11,7 +11,7 @@ import {
 } from "./logic/contactSettingsStore.js";
 import {
     submitGuestBooking,
-} from "./logic/guestBookingFlow.js?v=20260724-trial-whatsapp-v1";
+} from "./logic/guestBookingFlow.js?v=20260726-booking-recovery-v1";
 import {
     renderTeacherBookings,
     cancelBooking,

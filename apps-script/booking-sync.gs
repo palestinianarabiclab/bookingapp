@@ -58,15 +58,21 @@ function getConfig_() {
   });
   const preplyRaw = getScriptProperty_(props, 'PREPLY_CALENDAR_ID', '');
   const additionalRaw = getScriptProperty_(props, 'ADDITIONAL_CALENDAR_IDS', '');
+  const firebaseTeacherEmail = normalizeEmail_(getScriptProperty_(props, 'FIREBASE_TEACHER_EMAIL', 'farouqmurtaja96@gmail.com'));
+  const notificationEmail = normalizeEmail_(
+    getScriptProperty_(props, 'NOTIFICATION_EMAIL', '') ||
+    getDefaultNotificationEmail_() ||
+    firebaseTeacherEmail
+  );
   return {
     firebaseApiKey: getScriptProperty_(props, 'FIREBASE_API_KEY', 'AIzaSyCfhVE4hdR5P7YW6JOAnSC5az7s-J8zEsc'),
     firebaseProjectId: getScriptProperty_(props, 'FIREBASE_PROJECT_ID', 'farouqapp-7ea93'),
-    firebaseTeacherEmail: normalizeEmail_(getScriptProperty_(props, 'FIREBASE_TEACHER_EMAIL', 'farouqmurtaja96@gmail.com')),
+    firebaseTeacherEmail: firebaseTeacherEmail,
     primaryCalendarId: getScriptProperty_(props, 'PRIMARY_CALENDAR_ID', 'primary'),
     preplyCalendarId: normalizeCalendarId_(preplyRaw),
     additionalCalendarIds: parseCalendarIds_(additionalRaw),
     defaultTimeZone: getScriptProperty_(props, 'DEFAULT_TIMEZONE', '') || Session.getScriptTimeZone() || 'Africa/Cairo',
-    notificationEmail: getScriptProperty_(props, 'NOTIFICATION_EMAIL', '') || getDefaultNotificationEmail_(),
+    notificationEmail: notificationEmail,
   };
 }
 
@@ -339,6 +345,15 @@ function installLessonReminderTrigger() {
     success: false,
     manualSetupRequired: true,
     message: 'Create the reminder trigger manually in Apps Script: Triggers > Add Trigger > sendUpcomingLessonReminders > Time-driven > Minutes timer > Every 5 minutes.',
+  };
+}
+
+function reconcileStudentBalancesFromFirestore() {
+  console.log('Legacy balance reconciliation trigger skipped. Student balances are managed by Firestore booking transactions.');
+  return {
+    success: true,
+    skipped: true,
+    message: 'Legacy balance reconciliation is no longer required.'
   };
 }
 

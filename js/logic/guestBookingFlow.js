@@ -252,13 +252,25 @@ export async function submitGuestBooking({
                 calendarSynced: true,
                 updatedAt: Date.now(),
             }, { merge: true });
-            if (isFreeTrial === true && studentUid) {
-                syncBatch.set(db.collection("users").doc(studentUid), {
-                    trialUsed: true,
-                    trialUsedAt: Date.now(),
-                }, { merge: true });
+            try {
+                await syncBatch.commit();
+            } catch (syncError) {
+                console.error("Booking was saved, but calendar metadata could not be written to Firestore:", syncError);
+                appsScriptMessage = [
+                    appsScriptMessage,
+                    "The booking and calendar event were created, but calendar details are pending in the student dashboard."
+                ].filter(Boolean).join(" ");
             }
-            await syncBatch.commit();
+            if (isFreeTrial === true && studentUid) {
+                try {
+                    await db.collection("users").doc(studentUid).set({
+                        trialUsed: true,
+                        trialUsedAt: Date.now(),
+                    }, { merge: true });
+                } catch (trialUpdateError) {
+                    console.error("Booking succeeded, but the free-trial profile flag could not be updated:", trialUpdateError);
+                }
+            }
         } else {
             appsScriptMessage = appsScriptSync?.message || "";
             const slotWasTaken = /no longer available|already (taken|booked)|conflict/i.test(appsScriptMessage);
@@ -367,7 +379,7 @@ export async function submitGuestBooking({
             .includes(err?.code);
         if (bookingMsg) {
             bookingMsg.textContent = permissionDenied
-                ? "The calendar email was sent, but Firestore rejected the booking. Please contact the teacher."
+                ? "Firestore rejected the booking before confirmation. No booking email was sent. Please refresh, sign in again, and retry."
                 : "Booking failed. Please try again.";
         }
     } finally {
