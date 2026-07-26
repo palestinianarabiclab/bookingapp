@@ -2179,10 +2179,13 @@ async function loadPublicLessonFeedbackSummary() {
         );
 }
 
-async function refreshTeacherLessonFeedback() {
+async function refreshTeacherLessonFeedback(snapshotRows = null) {
     if (!window.db || !state.teacherUser || state.teacherRole !== "teacher") return;
-    const snap = await window.db.collection("lessonFeedback").orderBy("createdAt", "desc").limit(100).get();
-    const rows = snap.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) }));
+    let rows = Array.isArray(snapshotRows) ? snapshotRows : null;
+    if (!rows) {
+        const snap = await window.db.collection("lessonFeedback").orderBy("createdAt", "desc").limit(100).get();
+        rows = snap.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) }));
+    }
     const summary = buildLessonFeedbackSummary(rows);
     if (els.teacherLessonFeedbackCount) {
         els.teacherLessonFeedbackCount.textContent = `${summary.studentCount} students · ${summary.lessonCount} new lesson rating${summary.lessonCount === 1 ? "" : "s"}`;
@@ -2228,13 +2231,14 @@ function startTeacherLessonFeedbackListener() {
         .orderBy("createdAt", "desc")
         .limit(100)
         .onSnapshot(
-            () => {
+            (snapshot) => {
+                const rows = snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) }));
                 if (state.teacherLessonFeedbackRefreshTimer) {
                     window.clearTimeout(state.teacherLessonFeedbackRefreshTimer);
                 }
                 state.teacherLessonFeedbackRefreshTimer = window.setTimeout(() => {
                     state.teacherLessonFeedbackRefreshTimer = null;
-                    refreshTeacherLessonFeedback().catch((error) => {
+                    refreshTeacherLessonFeedback(rows).catch((error) => {
                         console.warn("Could not refresh lesson feedback statistics.", error);
                     });
                 }, 250);
@@ -4728,7 +4732,6 @@ async function refreshTeacherDashboard() {
     syncTeacherFormFields();
     await refreshTeacherStudents();
     await refreshTeacherBookings();
-    await refreshTeacherLessonFeedback();
     await refreshGoogleCalendarStatus();
     await renderBookingCalendar();
     updateTeacherOverviewStats();
@@ -5190,7 +5193,7 @@ function startPreplyStatisticsAutoSync() {
         syncPreplyStatistics().catch((error) => {
             console.warn("Automatic Preply statistics sync failed.", error);
         });
-    }, 30 * 60 * 1000);
+    }, 60 * 60 * 1000);
 }
 
 function updateSystemSyncStatusIndicator() {
@@ -5588,7 +5591,7 @@ function startBalanceReconcileAutoRefresh() {
                 }
             })
             .catch(console.error);
-    }, 10 * 60 * 1000);
+    }, 30 * 60 * 1000);
 }
 
 function stopBalanceReconcileAutoRefresh() {

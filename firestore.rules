@@ -379,6 +379,15 @@ service cloud.firestore {
       ) || (
         signedIn() &&
           get(/databases/$(database)/documents/bookings/$(docId)).data.studentUid == request.auth.uid &&
+          request.resource.data.status == resource.data.status &&
+          request.resource.data.slot == resource.data.slot &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'updatedAt',
+            'calendarSynced'
+          ])
+      ) || (
+        signedIn() &&
+          get(/databases/$(database)/documents/bookings/$(docId)).data.studentUid == request.auth.uid &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'slot',
             'status',
@@ -539,6 +548,20 @@ service cloud.firestore {
           ) &&
           hasValidMeetingLink(request.resource.data) &&
           isSafeStatus(request.resource.data.status)
+      ) || (
+        signedIn() &&
+          (resource.data.studentUid == request.auth.uid || resource.data.email == request.auth.token.email) &&
+          (resource.data.studentUid == null || request.resource.data.studentUid == resource.data.studentUid) &&
+          request.resource.data.status == resource.data.status &&
+          request.resource.data.slot == resource.data.slot &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'updatedAt',
+            'calendarSynced',
+            'googleCalendarEventId',
+            'meetingUrl',
+            'history'
+          ]) &&
+          hasValidMeetingLink(request.resource.data)
       ) || (
         signedIn() &&
           (resource.data.studentUid == request.auth.uid || resource.data.email == request.auth.token.email) &&
