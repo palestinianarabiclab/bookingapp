@@ -151,6 +151,8 @@ service cloud.firestore {
           'requestedAmount',
           'requestedLessons',
           'reviewRequested',
+          'lessonCredits',
+          'totalPaid',
           'reviewRequestedAt',
           'trialUsed',
           'trialUsedAt',
