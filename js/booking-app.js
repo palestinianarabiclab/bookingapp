@@ -721,7 +721,8 @@ function getStudentBalance() {
 }
 
 function getStudentLessonPrice() {
-    return toMoneyValue(state.studentProfile?.lessonPrice);
+    const teacherPrice = toMoneyValue(state.bookingSettings?.courseOffers?.courseAccessPrice);
+    return teacherPrice > 0 ? teacherPrice : toMoneyValue(state.studentProfile?.lessonPrice);
 }
 
 function updateStudentBalanceUi() {
@@ -748,8 +749,11 @@ function updateStudentBalanceUi() {
     const remainingBadge = document.getElementById("studentRemainingLessonsBadge");
     if (remainingBadge) {
         const hasPackageCredits = Number.isFinite(Number(state.studentProfile?.lessonCredits));
+        const legacyCredits = hasPackageCredits && lessonPrice > 0
+            ? Math.max(0, Math.floor((balance - Number(state.studentProfile?.totalPaid || 0)) / lessonPrice))
+            : 0;
         const remainingLessons = hasPackageCredits
-            ? Math.max(0, Math.floor(Number(state.studentProfile.lessonCredits)))
+            ? Math.max(0, Math.floor(Number(state.studentProfile.lessonCredits))) + legacyCredits
             : lessonPrice > 0
                 ? (balance >= 0 ? Math.floor(balance / lessonPrice) : Math.ceil(balance / lessonPrice))
                 : 0;
@@ -2896,7 +2900,7 @@ async function createTeacherLessonForStudent(student, slot, durationMinutes) {
         studentUid,
         timezone,
         isFreeTrial: false,
-        lessonPrice: Number(student.lessonPrice) > 0 ? Number(student.lessonPrice) : Number(state.bookingSettings?.courseOffers?.courseAccessPrice || 0),
+        lessonPrice: Number(state.bookingSettings?.courseOffers?.courseAccessPrice || 0),
         history: [{
             at: createdAt,
             action: "created_by_teacher",
@@ -4154,7 +4158,7 @@ function wireStudentActions() {
             updateStudentAccountUi();
         }
         const balance = Number(profile.balance || 0);
-        const lessonPrice = Number(profile.lessonPrice) > 0 ? Number(profile.lessonPrice) : Number(state.bookingSettings?.courseOffers?.courseAccessPrice || 0);
+        const lessonPrice = Number(state.bookingSettings?.courseOffers?.courseAccessPrice || 0);
         if (!isTrial && lessonPrice <= 0) {
             setStatus(els.bookingMsg, "The teacher must configure the lesson price before paid lessons can be booked.", "error");
             return;
@@ -7057,7 +7061,7 @@ function wireTeacherActions() {
             const student = state.studentCache.get(studentId) || {};
             const currentBalance = Number(student.balance || 0);
             const newBalance = currentBalance + creditAmount;
-            const lessonPrice = Number(student.lessonPrice) > 0 ? Number(student.lessonPrice) : Number(state.bookingSettings?.courseOffers?.courseAccessPrice || 0);
+            const lessonPrice = Number(state.bookingSettings?.courseOffers?.courseAccessPrice || 0);
 
             withButtonLoading(quickCreditBtn, "Adding...", async () => {
                 await saveStudentFinance(studentId, newBalance, lessonPrice, {
@@ -7066,7 +7070,11 @@ function wireTeacherActions() {
                     paymentStatus: "approved",
                     paymentNote: `Added +$${creditAmount} credit (Previous: $${currentBalance})`,
                     courseAccessRequested: false,
-                    lessonCredits: isPackageApproval ? Number(student.lessonCredits || 0) + packageLessons : Number(student.lessonCredits || 0),
+                    lessonCredits: isPackageApproval
+                        ? (Object.prototype.hasOwnProperty.call(student, "lessonCredits")
+                            ? Number(student.lessonCredits || 0)
+                            : Math.max(0, Math.floor(currentBalance / Math.max(lessonPrice, 0.01)))) + packageLessons
+                        : Number(student.lessonCredits || 0),
                     totalPaid: isPackageApproval ? Number(student.totalPaid || 0) + creditAmount : Number(student.totalPaid || 0),
                 });
                 await refreshTeacherStudents();
