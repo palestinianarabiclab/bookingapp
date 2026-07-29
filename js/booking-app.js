@@ -72,6 +72,7 @@ const state = {
     reviews: loadLocalReviews("teacher_reviews_v1", createInitialReviews()),
     reviewsSortMode: "newest",
     selectedPackage: null,
+    reservedPaidLessons: 0,
     runtimeBusyBlocks: [],
     selectedSlotMs: null,
     selectedDateKey: "",
@@ -277,6 +278,11 @@ function cacheDom() {
         "studentReviewSubmit",
         "studentReviewMsg",
         "studentReviewSuccessBox",
+        "studentReviewPrompt",
+        "studentReviewPromptWrite",
+        "studentReviewPromptLater",
+        "studentReviewPromptDismiss",
+        "studentReviewPromptMsg",
         "lessonFeedbackCard",
         "lessonFeedbackForm",
         "lessonFeedbackBookingId",
@@ -401,7 +407,7 @@ function loadScriptOnce(src) {
 async function ensureGoogleCalendarModuleLoaded() {
     if (window.connectToGoogleCalendar && window.importGoogleCalendarEventsToBusyBlocks) return;
     if (!state.googleCalendarModuleLoading) {
-        state.googleCalendarModuleLoading = loadScriptOnce("./js/google-calendar.js").finally(() => {
+        state.googleCalendarModuleLoading = loadScriptOnce("./js/google-calendar.js?v=20260729-busy-reconcile-v5").finally(() => {
             state.googleCalendarModuleLoading = null;
         });
     }
@@ -729,6 +735,28 @@ function getConfiguredLessonPrice() {
     return match ? toMoneyValue(match[0]) : 0;
 }
 
+function getStudentTotalLessonCredits(profile = state.studentProfile || {}, balance = Number(profile.balance || 0), lessonPrice = getConfiguredLessonPrice()) {
+    if (Number.isFinite(Number(profile.lessonCredits))) {
+        const packageCredits = Math.max(0, Math.floor(Number(profile.lessonCredits || 0)));
+        const legacyCredits = lessonPrice > 0 ? Math.max(0, Math.floor((balance - Number(profile.totalPaid || 0)) / lessonPrice)) : 0;
+        return packageCredits + legacyCredits;
+    }
+    return lessonPrice > 0 ? Math.max(0, Math.floor(balance / lessonPrice)) : 0;
+}
+
+function isUnchargedPaidBooking(booking) {
+    const status = String(booking?.status || "booked").toLowerCase();
+    return booking?.isFreeTrial !== true && !booking?.balanceChargedAt && booking?.balanceCharged !== true && status !== "canceled" && status !== "completed";
+}
+
+async function countReservedPaidLessons(studentUid) {
+    if (!window.db || !studentUid) return 0;
+    const snap = await window.db.collection("bookings").where("studentUid", "==", studentUid).limit(200).get();
+    let count = 0;
+    snap.forEach((doc) => { if (isUnchargedPaidBooking(doc.data() || {})) count += 1; });
+    return count;
+}
+
 function updateStudentBalanceUi() {
     const signedIn = isStudentSignedIn();
     if (els.studentBalanceCard) {
@@ -752,15 +780,7 @@ function updateStudentBalanceUi() {
 
     const remainingBadge = document.getElementById("studentRemainingLessonsBadge");
     if (remainingBadge) {
-        const hasPackageCredits = Number.isFinite(Number(state.studentProfile?.lessonCredits));
-        const legacyCredits = hasPackageCredits && lessonPrice > 0
-            ? Math.max(0, Math.floor((balance - Number(state.studentProfile?.totalPaid || 0)) / lessonPrice))
-            : 0;
-        const remainingLessons = hasPackageCredits
-            ? Math.max(0, Math.floor(Number(state.studentProfile.lessonCredits))) + legacyCredits
-            : lessonPrice > 0
-                ? (balance >= 0 ? Math.floor(balance / lessonPrice) : Math.ceil(balance / lessonPrice))
-                : 0;
+        const remainingLessons = Math.max(0, getStudentTotalLessonCredits() - Number(state.reservedPaidLessons || 0));
         if (remainingLessons > 0) {
             remainingBadge.textContent = `(${remainingLessons} lesson${remainingLessons === 1 ? "" : "s"} remaining)`;
             remainingBadge.style.background = "var(--primary)";
@@ -1767,6 +1787,7 @@ async function loadStudentBookings() {
     if (!els.bookingStatusList) return;
     els.bookingStatusList.innerHTML = "";
     if (!state.currentUser || state.currentRole !== "student") {
+        state.reservedPaidLessons = 0;
         els.bookingStatusList.innerHTML = "<div class=\"small-note\">Sign in to see your bookings.</div>";
         return;
     }
@@ -1818,6 +1839,8 @@ async function loadStudentBookings() {
 
         const rows = Array.from(rowsMap.values());
         rows.sort((a, b) => (b.slot || 0) - (a.slot || 0));
+        state.reservedPaidLessons = rows.filter(isUnchargedPaidBooking).length;
+        updateStudentBalanceUi();
         await syncLessonFeedbackPrompt(rows);
 
         const now = Date.now();
@@ -3759,7 +3782,7 @@ function wireStudentActions() {
             state.bookingWeekOffset = Math.max(0, state.bookingWeekOffset - 1);
             state.visibleDateKey = "";
             showBookingCalendarLoading();
-            await refreshRuntimeBusyBlocks();
+            await refreshRuntimeBusyBlocks({ force: true, minDays: 31 });
             await renderBookingCalendar();
         }).catch(console.error);
     });
@@ -4168,9 +4191,11 @@ function wireStudentActions() {
             return;
         }
         const allowOverdraft = profile.allowOverdraft === true;
+        const reservedLessons = isTrial ? 0 : await countReservedPaidLessons(state.currentUser.uid);
+        const availableLessons = Math.max(0, getStudentTotalLessonCredits(profile, balance, lessonPrice) - reservedLessons);
 
-        if (!isTrial && !allowOverdraft && balance < lessonPrice) {
-            setStatus(els.bookingMsg, `Sorry, your balance is insufficient to book this lesson. (Required: $${lessonPrice}, Current: $${balance}). Please top up your account or contact the teacher.`, "error");
+        if (!isTrial && !allowOverdraft && availableLessons < 1) {
+            setStatus(els.bookingMsg, `You have no unreserved lesson credit left. ${reservedLessons} paid lesson${reservedLessons === 1 ? " is" : "s are"} already booked. Complete, cancel, or add credit before booking another lesson.`, "error");
             return;
         }
 
@@ -4225,6 +4250,7 @@ function wireStudentActions() {
             loadBookingStatus,
             isLocalDevHost,
         }));
+        await loadStudentBookings();
     });
 
     if (els.studentRatingSelect && !els.studentRatingSelect.querySelector("option[value='1']")) {
@@ -4345,6 +4371,37 @@ function wireStudentActions() {
                 if (parsed.error) msg = parsed.error;
             } catch (_) {}
             setStatus(els.studentReviewMsg, msg, "error");
+        }
+    });
+
+    els.studentReviewPromptWrite?.addEventListener("click", () => {
+        if (els.studentReviewPrompt) els.studentReviewPrompt.hidden = true;
+        els.studentReviewCard?.scrollIntoView({ behavior: "smooth", block: "start" });
+        window.setTimeout(() => els.studentReviewText?.focus(), 450);
+    });
+
+    els.studentReviewPromptLater?.addEventListener("click", () => {
+        const key = els.studentReviewPrompt?.dataset.sessionKey;
+        if (key) sessionStorage.setItem(key, "true");
+        if (els.studentReviewPrompt) els.studentReviewPrompt.hidden = true;
+    });
+
+    els.studentReviewPromptDismiss?.addEventListener("click", async () => {
+        const user = state.currentUser;
+        if (!user?.uid || !window.db) return;
+        try {
+            await withButtonLoading(els.studentReviewPromptDismiss, "Saving...", async () => {
+                await window.db.collection("users").doc(user.uid).set({
+                    reviewRequested: false,
+                }, { merge: true });
+                state.studentProfile = {
+                    ...(state.studentProfile || {}),
+                    reviewRequested: false,
+                };
+                syncStudentReviewUi();
+            });
+        } catch (error) {
+            setStatus(els.studentReviewPromptMsg, error.message || "Could not close the review request.", "error");
         }
     });
 
@@ -5963,6 +6020,15 @@ function syncStudentReviewUi() {
     const studentProfile = state.studentProfile || {};
     const hasReviewed = localStorage.getItem(`review_submitted_${user?.uid || user?.email || "guest"}`) === "true" || studentProfile.hasSubmittedReview === true;
     const reviewRequested = studentProfile.reviewRequested === true && !hasReviewed;
+    const requestStamp = studentProfile.reviewRequestedAt?.toMillis?.()
+        || studentProfile.reviewRequestedAt?.seconds
+        || studentProfile.reviewRequestedAt
+        || "active";
+    const promptSessionKey = `review_prompt_later_${user?.uid || user?.email || "guest"}_${requestStamp}`;
+    if (els.studentReviewPrompt) {
+        els.studentReviewPrompt.hidden = !reviewRequested || sessionStorage.getItem(promptSessionKey) === "true";
+        els.studentReviewPrompt.dataset.sessionKey = promptSessionKey;
+    }
 
     const shouldShowReviewCard = reviewRequested && !hasReviewed;
     els.studentReviewCard.hidden = !shouldShowReviewCard;
