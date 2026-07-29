@@ -1162,11 +1162,20 @@ async function refreshRuntimeBusyBlocksNow({ force = false, minDays = 0 } = {}) 
             days: requestedDays,
             timeZone: getTeacherTimezone(),
             includeTeacherDetails: state.teacherRole === "teacher",
+            force,
         });
         state.busySyncReady = !!(result?.success && Array.isArray(result.busyBlocks));
         state.busySyncMessage = state.busySyncReady ? "" : (result?.message || "Could not reach Google Calendar sync.");
+        const seenBusyIntervals = new Set();
         state.runtimeBusyBlocks = state.busySyncReady
-            ? [...result.busyBlocks].sort((a, b) => Number(a.startMs || 0) - Number(b.startMs || 0))
+            ? [...result.busyBlocks]
+                .filter((block) => {
+                    const key = `${Number(block?.startMs || 0)}:${Number(block?.endMs || 0)}`;
+                    if (seenBusyIntervals.has(key)) return false;
+                    seenBusyIntervals.add(key);
+                    return true;
+                })
+                .sort((a, b) => Number(a.startMs || 0) - Number(b.startMs || 0))
             : [];
         state.busyBlocksRangeDays = state.busySyncReady ? requestedDays : 0;
         state.busyBlocksFetchedAt = Date.now();
@@ -4638,6 +4647,19 @@ function removeExpiredExceptions() {
     return removedCount;
 }
 
+async function removeImportedCalendarExceptions() {
+    const exceptions = Array.isArray(state.bookingSettings.exceptions) ? state.bookingSettings.exceptions : [];
+    const manualOnly = exceptions.filter((item) => {
+        const source = String(item?.source || "").toLowerCase();
+        return source !== "googlecalendar" && !String(item?.sourceEventId || "").trim();
+    });
+    if (manualOnly.length === exceptions.length) return 0;
+    state.bookingSettings.exceptions = manualOnly;
+    await saveTeacherSettings();
+    renderExceptions();
+    return exceptions.length - manualOnly.length;
+}
+
 async function saveBookingSettingsPublicMirror() {
     const publicCourseOffers = {
         ...(state.bookingSettings.courseOffers || {}),
@@ -6726,12 +6748,14 @@ function wireTeacherActions() {
     });
 
     els.appsScriptRefreshBusyBtn?.addEventListener("click", async (event) => {
+        let removedCount = 0;
         await withButtonLoading(event.currentTarget, "Importing...", async () => {
-            await refreshRuntimeBusyBlocks();
+            await refreshRuntimeBusyBlocks({ force: true, minDays: 31 });
+            removedCount = await removeImportedCalendarExceptions();
             await renderBookingCalendar();
         });
         setStatus(els.appsScriptMsg, state.runtimeBusyBlocks.length
-            ? `Loaded ${state.runtimeBusyBlocks.length} busy blocks from Apps Script.`
+            ? `Loaded ${state.runtimeBusyBlocks.length} current busy blocks${removedCount ? ` and removed ${removedCount} stale imported block${removedCount === 1 ? "" : "s"}` : ""}.`
             : "Apps Script busy blocks refreshed.", "success");
     });
 
@@ -7416,16 +7440,21 @@ function wireTeacherActions() {
     });
 
     els.googleImportBtn?.addEventListener("click", async (event) => {
-        const result = await withButtonLoading(event.currentTarget, "Importing...", async () => {
-            await ensureGoogleCalendarModuleLoaded();
-            return window.importGoogleCalendarEventsToBusyBlocks?.();
+        let removedCount = 0;
+        await withButtonLoading(event.currentTarget, "Importing...", async () => {
+            await refreshRuntimeBusyBlocks({ force: true, minDays: 31 });
+            if (!state.busySyncReady) {
+                throw new Error(state.busySyncMessage || "Could not load Google Calendar busy times.");
+            }
+            removedCount = await removeImportedCalendarExceptions();
+            await renderBookingCalendar();
+        }).then(async () => {
+            const count = state.runtimeBusyBlocks.length;
+            state.googleCalendarMessage = `Busy times refreshed through Apps Script (${count} event${count === 1 ? "" : "s"})${removedCount ? `; removed ${removedCount} stale imported block${removedCount === 1 ? "" : "s"}` : ""}.`;
+            await refreshGoogleCalendarStatus();
+        }).catch((error) => {
+            setStatus(els.googleCalendarStatus, error?.message || "Import failed.", "error");
         });
-        if (result?.success) {
-            state.googleCalendarMessage = result.message || "Calendar events imported.";
-            await refreshTeacherDashboard();
-        } else {
-            setStatus(els.googleCalendarStatus, result?.message || "Import failed.", "error");
-        }
     });
 
     els.googleTestPreplyBtn?.addEventListener("click", async (event) => {
