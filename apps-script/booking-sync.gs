@@ -152,9 +152,7 @@ function sendStudentConfirmationEmail_(recipient, details) {
     'Date & time: ' + (details.slotLabel || ''),
     'Teacher timezone: ' + (details.timeZone || ''),
     'Booking ID: ' + (details.bookingId || ''),
-    '',
-    'When it is time for your lesson, sign in to your student account and click "Join Lesson" from your dashboard.',
-    details.siteUrl ? 'Open the lesson website: ' + details.siteUrl : '',
+    details.meetingUrl ? 'Join lesson: ' + details.meetingUrl : '',
     '',
     'If you need to change the booking, please reply to this email or contact us on WhatsApp.',
     '',
@@ -173,9 +171,9 @@ function sendStudentScheduleUpdateEmail_(recipient, details) {
     'New date & time: ' + (details.slotLabel || ''),
     'Duration: ' + (details.durationMinutes || 50) + ' minutes',
     'Teacher timezone: ' + (details.timeZone || ''),
+    details.meetingUrl ? 'Join lesson: ' + details.meetingUrl : '',
     '',
-    'When it is time for your lesson, sign in to your student account and click "Join Lesson" from your dashboard.',
-    details.siteUrl ? 'Open the lesson website: ' + details.siteUrl : '',
+    'The updated lesson is also visible in your student account.',
     '',
     'Thank you.'
   ].join('\n');
@@ -898,8 +896,6 @@ function handleRequest_(e) {
       let phone = req.phone || '';
       let notes = req.notes || '';
       const bookingId = req.bookingId || '';
-      const requestedSiteUrl = String(req.siteUrl || '');
-      const siteUrl = /^https?:\/\//i.test(requestedSiteUrl) ? requestedSiteUrl.slice(0, 500) : '';
       const teacherEmail = normalizeEmail_(config.notificationEmail);
       if (!slot) {
         return jsonOut({ success: false, message: 'Missing slot timestamp.' });
@@ -931,8 +927,8 @@ function handleRequest_(e) {
         'Notes: ' + notes,
         'Timezone: ' + timeZone
       ].join('\n');
-      var calendarInviteSent = false;
-      var calendarInviteError = '';
+      var calendarInviteSent = isValidEmail_(email);
+      var calendarInviteError = calendarInviteSent ? '' : 'Student email is invalid for calendar invite.';
       const eventResource = {
         summary: 'Lesson with ' + name,
         description: description,
@@ -958,6 +954,9 @@ function handleRequest_(e) {
           }
         }
       };
+      if (calendarInviteSent) {
+        eventResource.attendees = [{ email: normalizeEmail_(email) }];
+      }
       const bookingLock = LockService.getScriptLock();
       bookingLock.waitLock(20000);
       let event;
@@ -998,7 +997,7 @@ function handleRequest_(e) {
           config.primaryCalendarId,
           {
             conferenceDataVersion: 1,
-            sendUpdates: 'none'
+            sendUpdates: calendarInviteSent ? 'all' : 'none'
           }
         );
       } finally {
@@ -1030,15 +1029,14 @@ function handleRequest_(e) {
       } catch (mailErr) {
         notificationError = mailErr && mailErr.message ? mailErr.message : String(mailErr);
       }
-      if (isValidEmail_(email)) {
+      if (!calendarInviteSent) {
         try {
           studentConfirmationSent = sendStudentConfirmationEmail_(email, {
             name: name,
             bookingId: bookingId,
             timeZone: timeZone,
             slotLabel: slotLabel,
-            meetingUrl: meetingUrl,
-            siteUrl: siteUrl
+            meetingUrl: meetingUrl
           });
           if (!studentConfirmationSent) {
             studentConfirmationError = email ? 'Student confirmation email was not accepted.' : 'Student email is missing.';
@@ -1138,8 +1136,6 @@ function handleRequest_(e) {
       const oldSlot = Number(req.oldSlot || 0);
       const newSlot = Number(req.newSlot || 0);
       const requestedDurationMinutes = Number(req.durationMinutes || 0);
-      const requestedSiteUrl = String(req.siteUrl || '');
-      const siteUrl = /^https?:\/\//i.test(requestedSiteUrl) ? requestedSiteUrl.slice(0, 500) : '';
       if (!bookingId || !oldSlot || !newSlot || newSlot <= Date.now()) {
         return jsonOut({ success: false, message: 'Invalid reschedule request.' });
       }
@@ -1201,7 +1197,6 @@ function handleRequest_(e) {
             durationMinutes: Math.round(durationMs / 60000),
             timeZone: config.defaultTimeZone,
             meetingUrl: meetingUrl,
-            siteUrl: siteUrl,
           }
         );
       } catch (notificationErr) {}
