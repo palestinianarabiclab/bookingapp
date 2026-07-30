@@ -3337,9 +3337,10 @@ async function recoverClassroomMeetingUrl(booking) {
     return meetingUrl;
 }
 
-async function openClassroomDirectly(booking) {
+async function openClassroomDirectly(booking, reservedTab = null) {
     const accessState = getLessonAccessState(booking?.slot);
     if (!accessState.canEnter) {
+        reservedTab?.close();
         const message = accessState.reason === "too-early"
             ? `The classroom opens 15 minutes before the lesson. ${getLessonEntryLabel(accessState)}.`
             : "This lesson classroom is no longer available.";
@@ -3347,6 +3348,14 @@ async function openClassroomDirectly(booking) {
         return;
     }
     let url = getClassroomMeetingUrl(booking);
+    // Reserve the new tab while the click gesture is still active. The tab can
+    // then be navigated safely after an async Firestore/Calendar lookup.
+    const lessonTab = reservedTab || window.open("about:blank", "_blank");
+    if (!lessonTab) {
+        window.alert("Your browser blocked the lesson tab. Allow pop-ups for this site, then click Join Lesson again.");
+        return;
+    }
+    lessonTab.opener = null;
     if (!url) {
         setAppLoading(true, "Preparing your Google Meet room...");
         try {
@@ -3355,11 +3364,12 @@ async function openClassroomDirectly(booking) {
             setAppLoading(false);
         }
         if (!url) {
+            lessonTab.close();
             window.alert("The Google Meet room could not be prepared. Ask the teacher to sync this booking from the calendar settings.");
             return;
         }
     }
-    window.location.assign(url);
+    lessonTab.location.replace(url);
 }
 
 function openClassroomModal(booking) {
@@ -3879,9 +3889,20 @@ function wireStudentActions() {
                     openClassroomDirectly({ id: bookingId, name: state.currentUser?.displayName || "Student" });
                     return;
                 }
-                const bookingSnap = await window.db.collection("bookings").doc(bookingId).get();
-                const booking = { id: bookingSnap.id, ...(bookingSnap.data() || {}) };
-                openClassroomDirectly(booking);
+                const lessonTab = window.open("about:blank", "_blank");
+                if (!lessonTab) {
+                    window.alert("Your browser blocked the lesson tab. Allow pop-ups for this site, then click Join Lesson again.");
+                    return;
+                }
+                lessonTab.opener = null;
+                try {
+                    const bookingSnap = await window.db.collection("bookings").doc(bookingId).get();
+                    const booking = { id: bookingSnap.id, ...(bookingSnap.data() || {}) };
+                    await openClassroomDirectly(booking, lessonTab);
+                } catch (error) {
+                    lessonTab.close();
+                    throw error;
+                }
                 return;
             }
             if (action === "whatsapp-reminder") {
