@@ -71,6 +71,7 @@ const state = {
     profileSettings: loadLocalProfileSettings("teacher_profile_v1", createInitialProfileSettings()),
     reviews: loadLocalReviews("teacher_reviews_v1", createInitialReviews()),
     reviewsSortMode: "newest",
+    reviewsExpanded: false,
     selectedPackage: null,
     reservedPaidLessons: 0,
     runtimeBusyBlocks: [],
@@ -265,6 +266,7 @@ function cacheDom() {
         "preplyAverageScoreText",
         "preplyReviewsGrid",
         "preplyReviewsSort",
+        "studentReviewsToggleBtn",
         "preplyRateDisplay",
         "preplyAvatarContainer",
         "preplyVideoContainer",
@@ -3829,7 +3831,16 @@ function wireStudentActions() {
 
     els.preplyReviewsSort?.addEventListener("change", (event) => {
         state.reviewsSortMode = event.target.value;
+        state.reviewsExpanded = false;
         renderReviewsUi();
+    });
+
+    els.studentReviewsToggleBtn?.addEventListener("click", () => {
+        state.reviewsExpanded = !state.reviewsExpanded;
+        renderReviewsUi();
+        if (!state.reviewsExpanded) {
+            els.studentReviewsSection?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
     });
 
     els.viewFullScheduleBtn?.addEventListener("click", () => {
@@ -6005,7 +6016,8 @@ function renderReviewsUi() {
                 sortedList.sort((a, b) => getReviewTimestamp(b) - getReviewTimestamp(a));
             }
 
-            els.preplyReviewsGrid.innerHTML = sortedList.map(r => {
+            const visibleReviews = state.reviewsExpanded ? sortedList : sortedList.slice(0, 6);
+            els.preplyReviewsGrid.innerHTML = visibleReviews.map(r => {
                 const stars = "⭐".repeat(Math.min(5, Math.max(1, Number(r.rating || 5))));
                 const avatarText = escapeHtml(r.avatar || (r.name ? r.name.substring(0, 2).toUpperCase() : "ST"));
                 return `
@@ -6035,6 +6047,15 @@ function renderReviewsUi() {
                 `;
             }).join("");
         }
+    }
+
+    if (els.studentReviewsToggleBtn) {
+        const hasMoreReviews = count > 6;
+        els.studentReviewsToggleBtn.hidden = !hasMoreReviews;
+        els.studentReviewsToggleBtn.textContent = state.reviewsExpanded
+            ? "Show fewer reviews"
+            : `Show all ${count} reviews`;
+        els.studentReviewsToggleBtn.setAttribute("aria-expanded", state.reviewsExpanded ? "true" : "false");
     }
 
     if (els.teacherReviewsAdminList) {

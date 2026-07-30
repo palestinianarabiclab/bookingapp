@@ -1629,6 +1629,16 @@ main.site-shell {
     padding: 22px;
 }
 
+.reviews-toggle-row {
+    display: flex;
+    justify-content: center;
+    margin-top: 22px;
+}
+
+.reviews-toggle-btn {
+    min-width: min(260px, 100%);
+}
+
 .teaching-style-card__head {
     display: flex;
     align-items: flex-start;
