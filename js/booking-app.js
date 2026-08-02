@@ -249,6 +249,9 @@ function cacheDom() {
         "teacherContactEmail",
         "teacherClassroomMeetingUrl",
         "contactMsg",
+        "revenueSettingsForm",
+        "teacherRevenueTotalInput",
+        "revenueSettingsMsg",
         "preplyTeacherName",
         "preplyArabicName",
         "preplyTeacherHeadline",
@@ -4576,6 +4579,7 @@ function syncTeacherFormFields() {
     if (els.teacherWhatsapp) els.teacherWhatsapp.value = state.contactSettings.whatsapp || "";
     if (els.teacherContactEmail) els.teacherContactEmail.value = state.contactSettings.email || "";
     if (els.teacherClassroomMeetingUrl) els.teacherClassroomMeetingUrl.value = state.contactSettings.classroomMeetingUrl || "";
+    if (els.teacherRevenueTotalInput) els.teacherRevenueTotalInput.value = Number(state.teacherRevenueTotal || 0).toFixed(2);
     const offers = state.bookingSettings.courseOffers || {};
     if (els.courseAccessPrice) els.courseAccessPrice.value = String(offers.courseAccessPrice ?? "");
     if (els.courseAccessUnits) els.courseAccessUnits.value = String(offers.courseAccessUnits ?? 15);
@@ -6280,26 +6284,26 @@ async function refreshTeacherStudents() {
                             </button>
                         </div>
 
-                        <div class="inline-fields">
-                            <label class="field">
+                        <div class="student-finance-grid">
+                            <label class="field student-finance-card student-finance-card--payment">
                                 <span>Payment Received (+$)</span>
                                 <input data-student-add-payment type="number" min="0" step="0.01" placeholder="100" />
                                 <button class="btn btn--primary btn--small" type="button" data-student-action="add-payment" data-student-id="${escapeHtml(student.id)}">Add Payment</button>
                             </label>
-                            <label class="field">
+                            <label class="field student-finance-card student-finance-card--refund">
                                 <span>Return Credit / Refund (+$)</span>
                                 <input data-student-add-refund type="number" min="0" step="0.01" placeholder="10" />
                                 <button class="btn btn--outline btn--small" type="button" data-student-action="add-refund" data-student-id="${escapeHtml(student.id)}">Return Credit</button>
                             </label>
-                            <label class="field">
+                            <label class="field student-finance-card student-finance-card--total">
                                 <span>Total Balance ($) — set exact amount</span>
                                 <input data-student-balance type="number" step="0.01" value="${escapeHtml(toMoneyValue(student.balance))}" />
                             </label>
-                            <label class="field">
+                            <label class="field student-finance-card student-finance-card--detail">
                                 <span>Lesson Price ($)</span>
                                 <input data-student-price type="number" min="0" step="0.01" value="${escapeHtml(lessonPrice)}" />
                             </label>
-                            <label class="field">
+                            <label class="field student-finance-card student-finance-card--detail">
                                 <span>Phone</span>
                                 <input value="${escapeHtml(student.phone || "")}" disabled />
                             </label>
@@ -6862,6 +6866,30 @@ function wireTeacherActions() {
             setStatus(els.contactMsg, "Contact settings saved.", "success");
         } catch (error) {
             setStatus(els.contactMsg, error.message || "Could not save contact settings.", "error");
+        }
+    });
+
+    els.revenueSettingsForm?.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const submitter = event.submitter;
+        try {
+            await withButtonLoading(submitter, "Saving...", async () => {
+                const total = Number(els.teacherRevenueTotalInput?.value);
+                if (!Number.isFinite(total) || total < 0) {
+                    throw new Error("Enter a valid total of 0 or more.");
+                }
+                const normalizedTotal = Math.round(total * 100) / 100;
+                await window.db.collection("teachers").doc(state.teacherUser.uid).set({
+                    revenueTotal: normalizedTotal,
+                    revenueUpdatedAt: Date.now(),
+                }, { merge: true });
+                state.teacherRevenueTotal = normalizedTotal;
+                if (els.teacherRevenueTotalInput) els.teacherRevenueTotalInput.value = normalizedTotal.toFixed(2);
+                updateTeacherOverviewStats();
+            });
+            setStatus(els.revenueSettingsMsg, "Total Payments Received updated successfully.", "success");
+        } catch (error) {
+            setStatus(els.revenueSettingsMsg, error.message || "Could not update the payments total.", "error");
         }
     });
 
