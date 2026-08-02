@@ -6132,13 +6132,24 @@ function closeStudentLessonsModal() {
 function renderStudentLessonRecords(rows, className) {
     if (!rows.length) return '<div class="small-note">No lessons in this section.</div>';
     return rows.map((booking) => {
-        const slot = Number(booking.slot || 0);
+        const slot = getBookingSlotMs(booking.slot);
         const duration = Number(booking.durationMinutes || booking.slotMinutes || state.bookingSettings?.slotMinutes || 50);
         const dateLabel = slot ? new Date(slot).toLocaleString([], { dateStyle: "medium", timeStyle: "short", timeZone: getTeacherTimezone() }) : "Date unavailable";
         const status = String(booking.status || "booked").toLowerCase();
         const detail = booking.isFreeTrial ? "Free trial" : `${duration} minutes · ${status}`;
         return `<div class="student-lesson-record ${className}"><strong>${escapeHtml(dateLabel)}</strong><span>${escapeHtml(detail)}</span></div>`;
     }).join("");
+}
+
+function getBookingSlotMs(value) {
+    if (typeof value === "number") return value;
+    if (value instanceof Date) return value.getTime();
+    if (typeof value?.toMillis === "function") return value.toMillis();
+    if (Number.isFinite(Number(value?.seconds))) return Number(value.seconds) * 1000;
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric;
+    const parsed = Date.parse(String(value || ""));
+    return Number.isFinite(parsed) ? parsed : 0;
 }
 
 async function openStudentLessonsModal(student) {
@@ -6155,14 +6166,23 @@ async function openStudentLessonsModal(student) {
     try {
         const queries = [window.db.collection("bookings").where("studentUid", "==", student.id).limit(200).get()];
         if (student.email) queries.push(window.db.collection("bookings").where("email", "==", student.email).limit(200).get());
+        if (student.name) queries.push(window.db.collection("bookings").where("name", "==", student.name).limit(200).get());
         const snapshots = await Promise.all(queries);
         const rowMap = new Map();
-        snapshots.forEach((snapshot) => snapshot.forEach((doc) => rowMap.set(doc.id, { id: doc.id, ...(doc.data() || {}) })));
+        const normalizedEmail = String(student.email || "").trim().toLowerCase();
+        const normalizedName = String(student.name || "").trim().toLowerCase();
+        snapshots.forEach((snapshot) => snapshot.forEach((doc) => {
+            const row = doc.data() || {};
+            const matchesUid = String(row.studentUid || "") === String(student.id);
+            const matchesEmail = normalizedEmail && String(row.email || row.studentEmail || "").trim().toLowerCase() === normalizedEmail;
+            const matchesLegacyName = !row.studentUid && normalizedName && String(row.name || row.studentName || "").trim().toLowerCase() === normalizedName;
+            if (matchesUid || matchesEmail || matchesLegacyName) rowMap.set(doc.id, { id: doc.id, ...row });
+        }));
         const now = Date.now();
-        const rows = Array.from(rowMap.values()).sort((a, b) => Number(a.slot || 0) - Number(b.slot || 0));
+        const rows = Array.from(rowMap.values()).sort((a, b) => getBookingSlotMs(a.slot) - getBookingSlotMs(b.slot));
         const canceled = rows.filter((row) => String(row.status || "").toLowerCase() === "canceled").reverse();
-        const upcoming = rows.filter((row) => { const status = String(row.status || "booked").toLowerCase(); return status !== "canceled" && status !== "completed" && Number(row.slot || 0) >= now; });
-        const taken = rows.filter((row) => { const status = String(row.status || "booked").toLowerCase(); return status !== "canceled" && (status === "completed" || Number(row.slot || 0) < now); }).reverse();
+        const upcoming = rows.filter((row) => { const status = String(row.status || "booked").toLowerCase(); return status !== "canceled" && status !== "completed" && getBookingSlotMs(row.slot) >= now; });
+        const taken = rows.filter((row) => { const status = String(row.status || "booked").toLowerCase(); return status !== "canceled" && (status === "completed" || (getBookingSlotMs(row.slot) > 0 && getBookingSlotMs(row.slot) < now)); }).reverse();
         content.innerHTML = `<div class="student-lessons-summary"><div><strong>${upcoming.length}</strong><span>Upcoming</span></div><div><strong>${taken.length}</strong><span>Taken</span></div><div><strong>${canceled.length}</strong><span>Canceled</span></div></div><div class="student-lessons-groups"><section class="student-lessons-group"><h4>Upcoming Lessons</h4>${renderStudentLessonRecords(upcoming, "")}</section><section class="student-lessons-group"><h4>Taken Lessons</h4>${renderStudentLessonRecords(taken, "student-lesson-record--taken")}</section><section class="student-lessons-group"><h4>Canceled Lessons</h4>${renderStudentLessonRecords(canceled, "student-lesson-record--canceled")}</section></div>`;
     } catch (error) { content.innerHTML = `<div class="status-line is-error">${escapeHtml(error.message || "Could not load lesson history.")}</div>`; }
 }
