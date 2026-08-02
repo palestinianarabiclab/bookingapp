@@ -6282,7 +6282,17 @@ async function refreshTeacherStudents() {
 
                         <div class="inline-fields">
                             <label class="field">
-                                <span>Balance ($)</span>
+                                <span>Payment Received (+$)</span>
+                                <input data-student-add-payment type="number" min="0" step="0.01" placeholder="100" />
+                                <button class="btn btn--primary btn--small" type="button" data-student-action="add-payment" data-student-id="${escapeHtml(student.id)}">Add Payment</button>
+                            </label>
+                            <label class="field">
+                                <span>Return Credit / Refund (+$)</span>
+                                <input data-student-add-refund type="number" min="0" step="0.01" placeholder="10" />
+                                <button class="btn btn--outline btn--small" type="button" data-student-action="add-refund" data-student-id="${escapeHtml(student.id)}">Return Credit</button>
+                            </label>
+                            <label class="field">
+                                <span>Total Balance ($) — set exact amount</span>
                                 <input data-student-balance type="number" step="0.01" value="${escapeHtml(toMoneyValue(student.balance))}" />
                             </label>
                             <label class="field">
@@ -6351,6 +6361,7 @@ async function saveStudentFinance(studentId, balance, lessonPrice, accessData = 
     const newBalance = toMoneyValue(balance);
     const diff = newBalance - oldBalance;
     const now = Date.now();
+    const countsAsPayment = accessData.adjustmentType === "payment";
     
     const updateData = {
         balance: newBalance,
@@ -6397,7 +6408,7 @@ async function saveStudentFinance(studentId, balance, lessonPrice, accessData = 
     await window.db.runTransaction(async (transaction) => {
         const teacherSnap = await transaction.get(teacherRef);
         transaction.set(userRef, updateData, { merge: true });
-        if (diff !== 0) {
+        if (diff !== 0 && countsAsPayment) {
             const teacherData = teacherSnap.exists ? (teacherSnap.data() || {}) : {};
             const currentRevenue = Number.isFinite(Number(teacherData.revenueTotal))
                 ? Number(teacherData.revenueTotal)
@@ -6408,7 +6419,9 @@ async function saveStudentFinance(studentId, balance, lessonPrice, accessData = 
             }, { merge: true });
         }
     });
-    state.teacherRevenueTotal = Number(state.teacherRevenueTotal ?? 210) + diff;
+    if (diff !== 0 && countsAsPayment) {
+        state.teacherRevenueTotal = Number(state.teacherRevenueTotal ?? 210) + diff;
+    }
     updateTeacherOverviewStats();
 }
 
@@ -7262,6 +7275,30 @@ function wireTeacherActions() {
             openStudentLessonsModal(state.studentCache.get(studentId) || { id: studentId }).catch(console.error);
             return;
         }
+        const balanceActionBtn = event.target.closest("[data-student-action='add-payment'], [data-student-action='add-refund']");
+        if (balanceActionBtn) {
+            const form = balanceActionBtn.closest("[data-student-editor]");
+            const studentId = balanceActionBtn.dataset.studentId || "";
+            const isPayment = balanceActionBtn.dataset.studentAction === "add-payment";
+            const amount = toMoneyValue(form?.querySelector(isPayment ? "[data-student-add-payment]" : "[data-student-add-refund]")?.value);
+            const student = state.studentCache.get(studentId) || {};
+            if (!studentId || amount <= 0) { setStatus(els.teacherStudentsMsg, "Enter an amount greater than zero.", "error"); return; }
+            withButtonLoading(balanceActionBtn, isPayment ? "Adding..." : "Returning...", async () => {
+                await saveStudentFinance(studentId, toMoneyValue(student.balance) + amount, form?.querySelector("[data-student-price]")?.value, {
+                    courseAccess: student.courseAccess === true,
+                    accessType: student.accessType || "none",
+                    paymentStatus: isPayment ? "approved" : (student.paymentStatus || "none"),
+                    paymentNote: form?.querySelector("[data-student-payment-note]")?.value || (isPayment ? "Manual payment" : "Teacher credit return"),
+                    courseAccessRequested: student.courseAccessRequested === true,
+                    allowOverdraft: student.allowOverdraft === true,
+                    reviewRequested: student.reviewRequested === true,
+                    adjustmentType: isPayment ? "payment" : "refund",
+                });
+                await refreshTeacherStudents();
+                setStatus(els.teacherStudentsMsg, `${isPayment ? "Payment added" : "Credit returned"}. New balance: ${formatMoney(toMoneyValue(student.balance) + amount)}.`, "success");
+            }).catch((error) => setStatus(els.teacherStudentsMsg, error.message || "Could not update balance.", "error"));
+            return;
+        }
         const toggle = event.target.closest("[data-student-action='toggle']");
         if (toggle) {
             const item = toggle.closest("[data-student-id]");
@@ -7295,6 +7332,7 @@ function wireTeacherActions() {
                             : Math.max(0, Math.floor(currentBalance / Math.max(lessonPrice, 0.01)))) + packageLessons
                         : Number(student.lessonCredits || 0),
                     totalPaid: isPackageApproval ? Number(student.totalPaid || 0) + creditAmount : Number(student.totalPaid || 0),
+                    adjustmentType: "payment",
                 });
                 await refreshTeacherStudents();
                 setStatus(els.teacherStudentsMsg, isPackageApproval
