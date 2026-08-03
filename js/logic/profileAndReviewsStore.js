@@ -230,7 +230,6 @@ export function saveLocalReviews(storageKey, reviews) {
 export async function loadCloudReviews(db, defaultReviews) {
     try {
         const snap = await db.collection("reviews")
-            .where("source", "==", "Student Review")
             .limit(100)
             .get();
         if (!snap.empty) {
