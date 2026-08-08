@@ -80,6 +80,24 @@ service cloud.firestore {
         get(userDocPath(uid)).data.trialUsed == true;
     }
 
+    function reservationCount(data) {
+      return data.keys().hasAny(['reservedLessonCredits']) ? data.reservedLessonCredits : 0;
+    }
+
+    function lessonEntitlement(data, price) {
+      return data.keys().hasAny(['lessonCredits'])
+        ? data.lessonCredits + (
+            data.keys().hasAny(['totalPaid']) && data.keys().hasAny(['balance']) && price > 0 && data.balance > data.totalPaid
+              ? (data.balance - data.totalPaid) / price
+              : 0
+          )
+        : (data.keys().hasAny(['balance']) && price > 0 ? data.balance / price : 0);
+    }
+
+    function allowsOverdraft(data) {
+      return data.keys().hasAny(['allowOverdraft']) && data.allowOverdraft == true;
+    }
+
     match /users/{uid} {
       allow read: if ownsDoc(uid) || isTeacher();
       allow create: if ownsDoc(uid) &&
@@ -115,6 +133,8 @@ service cloud.firestore {
           'paymentNote',
           'reviewRequested',
           'reviewSubmittedAt',
+          'reservedLessonCredits',
+          'entitlementUpdatedAt',
           'updatedAt'
         ]) &&
         (
@@ -124,6 +144,11 @@ service cloud.firestore {
         (
           !request.resource.data.diff(resource.data).affectedKeys().hasAny(['hasSubmittedReview']) ||
           request.resource.data.hasSubmittedReview == true
+        ) &&
+        (
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['reservedLessonCredits']) ||
+          (request.resource.data.reservedLessonCredits is int || request.resource.data.reservedLessonCredits is float) &&
+          request.resource.data.reservedLessonCredits >= 0
         ) &&
         (
           !request.resource.data.diff(resource.data).affectedKeys().hasAny(['trialUsed']) ||
@@ -152,6 +177,8 @@ service cloud.firestore {
           'requestedLessons',
           'reviewRequested',
           'lessonCredits',
+          'reservedLessonCredits',
+          'entitlementUpdatedAt',
           'totalPaid',
           'reviewRequestedAt',
           'trialUsed',
@@ -465,8 +492,31 @@ service cloud.firestore {
           'studentUid',
           'timezone',
           'isFreeTrial',
-          'lessonPrice',
-          'history'
+          'pricingVersion',
+          'history',
+          'bookingOperationId',
+          'reservationStatus',
+          'reservedAt',
+          'consumeAfter'
+          ,'calendarSyncState'
+          ,'calendarSyncAttempts'
+          ,'calendarSyncLastError'
+          ,'calendarLastCheckedAt'
+          ,'calendarLastSyncedAt'
+          ,'calendarNextRetryAt'
+          ,'notificationVersion'
+          ,'teacherNotificationStatus'
+          ,'teacherNotificationAttempts'
+          ,'teacherNotificationLastAttemptAt'
+          ,'teacherNotificationNextRetryAt'
+          ,'teacherNotificationLastError'
+          ,'teacherNotificationSentAt'
+          ,'studentNotificationStatus'
+          ,'studentNotificationAttempts'
+          ,'studentNotificationLastAttemptAt'
+          ,'studentNotificationNextRetryAt'
+          ,'studentNotificationLastError'
+          ,'studentNotificationSentAt'
         ]) &&
         signedIn() &&
         (
@@ -494,10 +544,22 @@ service cloud.firestore {
         request.resource.data.durationMinutes <= 240 &&
         request.resource.data.slot < request.time.toMillis() + 366 * 24 * 60 * 60 * 1000 &&
         request.resource.data.isFreeTrial is bool &&
-        isNumber(request.resource.data.lessonPrice) &&
-        request.resource.data.lessonPrice >= 0 &&
-        request.resource.data.lessonPrice <= 10000 &&
-        (request.resource.data.isFreeTrial == true || request.resource.data.lessonPrice > 0) &&
+        request.resource.data.pricingVersion is string &&
+        request.resource.data.pricingVersion.size() > 0 &&
+        request.resource.data.pricingVersion.size() <= 200 &&
+        (request.resource.data.source == "teacher" || request.resource.data.isFreeTrial == true ||
+          request.resource.data.pricingVersion == get(/databases/$(database)/documents/studentEntitlements/$(request.auth.uid)).data.pricingVersion) &&
+        (
+          request.resource.data.source == "teacher" ||
+          request.resource.data.isFreeTrial == true ||
+          get(/databases/$(database)/documents/studentEntitlements/$(request.auth.uid)).data.allowOverdraft == true ||
+          (
+            getAfter(/databases/$(database)/documents/studentEntitlements/$(request.auth.uid)).data.reservedLessonCredits ==
+              get(/databases/$(database)/documents/studentEntitlements/$(request.auth.uid)).data.reservedLessonCredits + 1 &&
+            getAfter(/databases/$(database)/documents/studentEntitlements/$(request.auth.uid)).data.lessonCredits >=
+              getAfter(/databases/$(database)/documents/studentEntitlements/$(request.auth.uid)).data.reservedLessonCredits
+          )
+        ) &&
         (
           request.resource.data.isFreeTrial == false ||
           (
@@ -515,7 +577,9 @@ service cloud.firestore {
         );
 
        allow read: if isTeacher() ||
-        (signedIn() && (resource.data.studentUid == request.auth.uid || resource.data.email == request.auth.token.email));
+        (signedIn() &&
+          (resource.data.studentUid == request.auth.uid || resource.data.email == request.auth.token.email) &&
+          !resource.data.keys().hasAny(['lessonPrice', 'chargedAmount']));
 
       allow update: if (
         isTeacher() &&
@@ -542,7 +606,31 @@ service cloud.firestore {
             'classroomNotes',
             'boardDataUrl',
             'boardUpdatedAt',
-            'completedAt'
+            'completedAt',
+            'reservationStatus',
+            'reservationReleasedAt',
+            'consumedAt',
+            'consumptionTransactionId',
+            'consumeAfter'
+            ,'calendarSyncState'
+            ,'calendarSyncAttempts'
+            ,'calendarSyncLastError'
+            ,'calendarLastCheckedAt'
+            ,'calendarLastSyncedAt'
+            ,'calendarNextRetryAt'
+            ,'notificationVersion'
+            ,'teacherNotificationStatus'
+            ,'teacherNotificationAttempts'
+            ,'teacherNotificationLastAttemptAt'
+            ,'teacherNotificationNextRetryAt'
+            ,'teacherNotificationLastError'
+            ,'teacherNotificationSentAt'
+            ,'studentNotificationStatus'
+            ,'studentNotificationAttempts'
+            ,'studentNotificationLastAttemptAt'
+            ,'studentNotificationNextRetryAt'
+            ,'studentNotificationLastError'
+            ,'studentNotificationSentAt'
           ]) &&
           (
             !request.resource.data.diff(resource.data).affectedKeys().hasAny(['canceledBy']) ||
@@ -580,7 +668,29 @@ service cloud.firestore {
             'canceledAt',
             'canceledBy',
             'rescheduledFrom',
-            'rescheduledAt'
+            'rescheduledAt',
+            'reservationStatus',
+            'reservationReleasedAt',
+            'consumeAfter'
+            ,'calendarSyncState'
+            ,'calendarSyncAttempts'
+            ,'calendarSyncLastError'
+            ,'calendarLastCheckedAt'
+            ,'calendarLastSyncedAt'
+            ,'calendarNextRetryAt'
+            ,'notificationVersion'
+            ,'teacherNotificationStatus'
+            ,'teacherNotificationAttempts'
+            ,'teacherNotificationLastAttemptAt'
+            ,'teacherNotificationNextRetryAt'
+            ,'teacherNotificationLastError'
+            ,'teacherNotificationSentAt'
+            ,'studentNotificationStatus'
+            ,'studentNotificationAttempts'
+            ,'studentNotificationLastAttemptAt'
+            ,'studentNotificationNextRetryAt'
+            ,'studentNotificationLastError'
+            ,'studentNotificationSentAt'
           ]) &&
           (
             !request.resource.data.diff(resource.data).affectedKeys().hasAny(['canceledBy']) ||
@@ -603,6 +713,76 @@ service cloud.firestore {
       );
 
       allow delete: if isTeacher();
+    }
+
+    match /lessonTransactions/{transactionId} {
+      allow read: if isTeacher();
+      allow create: if isTeacher() && !exists(/databases/$(database)/documents/lessonTransactions/$(transactionId));
+      allow update, delete: if false;
+    }
+
+    match /studentEntitlements/{uid} {
+      allow read: if ownsDoc(uid) || isTeacher();
+      allow create: if isTeacher() || (
+        ownsDoc(uid) &&
+        request.resource.data.keys().hasOnly(['studentUid', 'lessonCredits', 'reservedLessonCredits', 'allowOverdraft', 'pricingVersion', 'entitlementUpdatedAt']) &&
+        request.resource.data.studentUid == uid &&
+        request.resource.data.lessonCredits == 0 &&
+        request.resource.data.reservedLessonCredits == 0 &&
+        request.resource.data.allowOverdraft == false &&
+        request.resource.data.pricingVersion == "unconfigured"
+      );
+      allow update: if isTeacher() || (
+        ownsDoc(uid) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['studentUid', 'reservedLessonCredits', 'entitlementUpdatedAt']) &&
+        request.resource.data.studentUid == uid &&
+        request.resource.data.reservedLessonCredits >= 0
+      );
+      allow delete: if isTeacher();
+    }
+
+    match /studentAccounting/{uid} {
+      allow read, create, update, delete: if isTeacher();
+    }
+
+    match /pricingSnapshots/{snapshotId} {
+      allow read, create: if isTeacher();
+      allow update, delete: if false;
+    }
+
+    match /teacherAccounting/{docId} {
+      allow read, create, update, delete: if isTeacher();
+    }
+
+    match /bookingSlotClaims/{claimId} {
+      allow read: if signedIn();
+      allow create, update: if signedIn() &&
+        request.resource.data.keys().hasOnly(['bookingId', 'studentUid', 'slot', 'durationMinutes', 'status', 'updatedAt']) &&
+        request.resource.data.status == "active" &&
+        existsAfter(/databases/$(database)/documents/bookings/$(request.resource.data.bookingId)) &&
+        getAfter(/databases/$(database)/documents/bookings/$(request.resource.data.bookingId)).data.status != "canceled" &&
+        (isTeacher() || getAfter(/databases/$(database)/documents/bookings/$(request.resource.data.bookingId)).data.studentUid == request.auth.uid);
+      allow delete: if signedIn() && (
+        isTeacher() ||
+        get(/databases/$(database)/documents/bookings/$(resource.data.bookingId)).data.studentUid == request.auth.uid
+      );
+    }
+
+    match /notificationJobs/{jobId} {
+      allow read: if isTeacher();
+      allow create: if signedIn() &&
+        request.resource.data.keys().hasOnly([
+          'id', 'bookingId', 'recipientType', 'recipientEmail', 'notificationType', 'version',
+          'state', 'attempts', 'createdAt', 'createdBy', 'sentAt', 'lastAttemptAt',
+          'nextRetryAt', 'lastError', 'idempotencyKey'
+        ]) &&
+        request.resource.data.id == jobId &&
+        request.resource.data.idempotencyKey == jobId &&
+        request.resource.data.state in ['pending', 'skipped'] &&
+        request.resource.data.attempts == 0 &&
+        existsAfter(/databases/$(database)/documents/bookings/$(request.resource.data.bookingId)) &&
+        (isTeacher() || getAfter(/databases/$(database)/documents/bookings/$(request.resource.data.bookingId)).data.studentUid == request.auth.uid);
+      allow update, delete: if false;
     }
 
     match /errorLogs/{docId} {

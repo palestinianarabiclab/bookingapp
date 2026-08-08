@@ -114,6 +114,8 @@ function sendBookingNotificationEmail_(recipient, details) {
     'Phone: ' + (details.phone || ''),
     'Slot: ' + (details.slotLabel || ''),
     'Timezone: ' + (details.timeZone || ''),
+    'Duration: ' + (details.durationMinutes || 50) + ' minutes',
+    'Lesson type: ' + (details.isFreeTrial ? 'Free trial' : 'Paid lesson'),
     'Booking ID: ' + (details.bookingId || ''),
     details.meetingUrl ? 'Google Meet: ' + details.meetingUrl : '',
     '',
@@ -151,6 +153,7 @@ function sendStudentConfirmationEmail_(recipient, details) {
     '',
     'Date & time: ' + (details.slotLabel || ''),
     'Teacher timezone: ' + (details.timeZone || ''),
+    'Duration: ' + (details.durationMinutes || 50) + ' minutes',
     'Booking ID: ' + (details.bookingId || ''),
     details.meetingUrl ? 'Join lesson: ' + details.meetingUrl : '',
     '',
@@ -626,6 +629,7 @@ function listEvents_(calendarId, start, end) {
     return {
       id: event.getId(),
       title: event.getTitle(),
+      description: event.getDescription() || '',
       start: event.getStartTime().getTime(),
       end: event.getEndTime().getTime(),
       calendarId: calendarId,
@@ -762,6 +766,9 @@ function buildBusyBlocks_(events, timeZone, includeTitles) {
         end: Utilities.formatDate(end, timeZone, 'HH:mm'),
         note: includeTitles ? (event.title || 'Busy') : 'Busy',
         sourceEventId: event.id || '',
+        bookingId: ((String(event.description || '').match(/^Booking ID:\s*(.+)$/mi) || [])[1] || '').trim(),
+        sourceType: 'calendar',
+        calendarId: event.calendarId || '',
       };
     });
 }
@@ -773,6 +780,446 @@ function getBusyCacheKey_(calendarIds, days, timeZone) {
     String(timeZone || ''),
     calendarIds.join('|')
   ].join('::');
+}
+
+function firestoreAdminFetch_(config, path, options) {
+  const token = ScriptApp.getOAuthToken();
+  return firestoreFetch_(config, token, path, options);
+}
+
+function fsBool_(doc, name) {
+  const value = fsField_(doc, name);
+  return value ? value.booleanValue === true : false;
+}
+
+function fsArray_(doc, name) {
+  const value = fsField_(doc, name);
+  return value && value.arrayValue && Array.isArray(value.arrayValue.values) ? value.arrayValue.values : [];
+}
+
+function firestoreValue_(value) {
+  if (value === null || value === undefined) return { nullValue: null };
+  if (typeof value === 'boolean') return { booleanValue: value };
+  if (typeof value === 'number') return Number.isInteger(value) ? { integerValue: String(value) } : { doubleValue: value };
+  if (Array.isArray(value)) return { arrayValue: { values: value.map(firestoreValue_) } };
+  if (typeof value === 'object') {
+    const fields = {};
+    Object.keys(value).forEach(function (key) { fields[key] = firestoreValue_(value[key]); });
+    return { mapValue: { fields: fields } };
+  }
+  return { stringValue: String(value) };
+}
+
+function firestorePatchAdmin_(config, documentPath, values) {
+  const fields = {};
+  const masks = [];
+  Object.keys(values).forEach(function (key) {
+    fields[key] = firestoreValue_(values[key]);
+    masks.push('updateMask.fieldPaths=' + encodeURIComponent(key));
+  });
+  return firestoreAdminFetch_(config, '/' + documentPath + '?' + masks.join('&'), {
+    method: 'patch',
+    contentType: 'application/json',
+    payload: JSON.stringify({ fields: fields }),
+  });
+}
+
+function firestoreDeleteAdmin_(config, documentPath) {
+  try { firestoreAdminFetch_(config, '/' + documentPath, { method: 'delete' }); } catch (err) {}
+}
+
+function queryBookingsAdmin_(config, filters, limit) {
+  const fieldFilters = (filters || []).map(function (filter) {
+    return { fieldFilter: { field: { fieldPath: filter.field }, op: filter.op || 'EQUAL', value: firestoreValue_(filter.value) } };
+  });
+  const where = fieldFilters.length === 1 ? fieldFilters[0] : { compositeFilter: { op: 'AND', filters: fieldFilters } };
+  const result = firestoreAdminFetch_(config, ':runQuery', {
+    method: 'post', contentType: 'application/json',
+    payload: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'bookings' }], where: where, limit: Math.max(1, Math.min(200, Number(limit || 50))) } }),
+  });
+  return Array.isArray(result) ? result.map(function (row) { return row.document; }).filter(Boolean) : [];
+}
+
+function queryNotificationJobsAdmin_(config, state, limit) {
+  const result = firestoreAdminFetch_(config, ':runQuery', {
+    method: 'post', contentType: 'application/json',
+    payload: JSON.stringify({ structuredQuery: {
+      from: [{ collectionId: 'notificationJobs' }],
+      where: { fieldFilter: { field: { fieldPath: 'state' }, op: 'EQUAL', value: firestoreValue_(state) } },
+      limit: Math.max(1, Math.min(100, Number(limit || 50)))
+    } }),
+  });
+  return Array.isArray(result) ? result.map(function (row) { return row.document; }).filter(Boolean) : [];
+}
+
+function sanitizeNotificationError_(err) {
+  return String(err && err.message ? err.message : err || 'Unknown email error')
+    .replace(/(token|authorization|api[_ -]?key)\s*[:=]\s*[^\s,;]+/ig, '$1=[redacted]')
+    .slice(0, 500);
+}
+
+function notificationRetryAt_(attempts) {
+  return Date.now() + Math.min(24 * 60 * 60 * 1000, Math.pow(2, Math.min(Math.max(1, Number(attempts || 1)), 10)) * 5 * 60000);
+}
+
+function sendTeacherScheduleUpdateEmail_(recipient, details) {
+  return sendPlainEmail_(recipient, 'Lesson schedule updated: ' + (details.name || 'Student'), [
+    'A platform lesson was rescheduled.', '', 'Student: ' + (details.name || ''),
+    'Email: ' + (details.email || ''), 'New date & time: ' + (details.slotLabel || ''),
+    'Duration: ' + (details.durationMinutes || 50) + ' minutes',
+    'Booking ID: ' + (details.bookingId || ''), details.meetingUrl ? 'Google Meet: ' + details.meetingUrl : ''
+  ].filter(Boolean).join('\n'));
+}
+
+function sendStudentCancellationConfirmationEmail_(recipient, details) {
+  const external = details.notificationType === 'external-cancellation';
+  return sendPlainEmail_(recipient, external ? 'Your lesson Calendar event was removed' : 'Your lesson was canceled', [
+    'Hello ' + (details.name || 'Student') + ',', '',
+    external ? 'The Calendar event for your lesson was removed and the platform booking was canceled safely.' : 'Your teacher canceled this lesson.',
+    '', 'Date & time: ' + (details.slotLabel || ''), 'Booking ID: ' + (details.bookingId || ''),
+    'No student late-cancellation classification was applied.'
+  ].join('\n'));
+}
+
+function notificationBookingStatusFields_(recipientType, state, attempts, error, sentAt, nextRetryAt) {
+  const prefix = recipientType === 'teacher' ? 'teacherNotification' : 'studentNotification';
+  const values = {};
+  values[prefix + 'Status'] = state;
+  values[prefix + 'Attempts'] = attempts;
+  values[prefix + 'LastAttemptAt'] = Date.now();
+  values[prefix + 'NextRetryAt'] = Number(nextRetryAt || 0);
+  values[prefix + 'LastError'] = error || '';
+  if (sentAt) values[prefix + 'SentAt'] = sentAt;
+  return values;
+}
+
+function processOneNotificationJob_(config, jobDoc) {
+  const jobId = firestoreDocId_(jobDoc);
+  const bookingId = fsString_(jobDoc, 'bookingId');
+  const recipientType = fsString_(jobDoc, 'recipientType');
+  let recipientEmail = normalizeEmail_(fsString_(jobDoc, 'recipientEmail'));
+  const notificationType = fsString_(jobDoc, 'notificationType');
+  const version = fsNumber_(jobDoc, 'version');
+  const attempts = fsNumber_(jobDoc, 'attempts');
+  if (fsString_(jobDoc, 'state') !== 'pending' || fsNumber_(jobDoc, 'nextRetryAt') > Date.now()) return { state: fsString_(jobDoc, 'state') || 'skipped' };
+  let booking;
+  try { booking = firestoreAdminFetch_(config, '/bookings/' + encodeURIComponent(bookingId), { method: 'get' }); }
+  catch (err) {
+    firestorePatchAdmin_(config, 'notificationJobs/' + encodeURIComponent(jobId), { state: 'failed', lastError: 'Booking no longer exists.', lastAttemptAt: Date.now(), nextRetryAt: 0 });
+    return { state: 'failed' };
+  }
+  if (notificationType === 'reschedule' && version !== fsNumber_(booking, 'notificationVersion')) {
+    firestorePatchAdmin_(config, 'notificationJobs/' + encodeURIComponent(jobId), { state: 'skipped', lastError: 'Superseded by a newer reschedule.', lastAttemptAt: Date.now(), nextRetryAt: 0 });
+    return { state: 'skipped' };
+  }
+  if (!isValidEmail_(recipientEmail) && recipientType === 'teacher') recipientEmail = normalizeEmail_(config.notificationEmail);
+  if (!isValidEmail_(recipientEmail)) {
+    const invalidError = 'Missing or invalid ' + recipientType + ' email.';
+    firestorePatchAdmin_(config, 'notificationJobs/' + encodeURIComponent(jobId), { state: 'skipped', lastError: invalidError, lastAttemptAt: Date.now(), nextRetryAt: 0 });
+    firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), notificationBookingStatusFields_(recipientType, 'skipped', attempts, invalidError, 0, 0));
+    return { state: 'skipped' };
+  }
+  const meetingUrl = fsString_(booking, 'meetingUrl');
+  if ((notificationType === 'booking-created' || notificationType === 'teacher-created') && !meetingUrl && fsString_(booking, 'calendarSyncState') !== 'failed') {
+    firestorePatchAdmin_(config, 'notificationJobs/' + encodeURIComponent(jobId), { nextRetryAt: Date.now() + 5 * 60 * 1000, lastError: 'Waiting for Google Meet link.' });
+    return { state: 'pending' };
+  }
+  const nextAttempts = attempts + 1;
+  firestorePatchAdmin_(config, 'notificationJobs/' + encodeURIComponent(jobId), { state: 'processing', attempts: nextAttempts, lastAttemptAt: Date.now(), deliveryStartedAt: Date.now(), lastError: '' });
+  const details = {
+    bookingId: bookingId, name: fsString_(booking, 'name'), email: fsString_(booking, 'email'), phone: fsString_(booking, 'phone'),
+    notes: fsString_(booking, 'notes'), timeZone: fsString_(booking, 'timezone') || config.defaultTimeZone,
+    slotLabel: Utilities.formatDate(new Date(fsNumber_(booking, 'slot')), fsString_(booking, 'timezone') || config.defaultTimeZone, 'yyyy-MM-dd HH:mm'),
+    durationMinutes: fsNumber_(booking, 'durationMinutes') || 50, meetingUrl: meetingUrl,
+    isFreeTrial: fsBool_(booking, 'isFreeTrial'), notificationType: notificationType,
+  };
+  try {
+    if (notificationType === 'booking-created' && recipientType === 'teacher') sendBookingNotificationEmail_(recipientEmail, details);
+    else if ((notificationType === 'booking-created' || notificationType === 'teacher-created') && recipientType === 'student') sendStudentConfirmationEmail_(recipientEmail, details);
+    else if (notificationType === 'reschedule' && recipientType === 'teacher') sendTeacherScheduleUpdateEmail_(recipientEmail, details);
+    else if (notificationType === 'reschedule' && recipientType === 'student') sendStudentScheduleUpdateEmail_(recipientEmail, details);
+    else if (notificationType === 'student-cancellation' && recipientType === 'teacher') sendBookingCancellationEmail_(recipientEmail, Object.assign({}, details, { canceledBy: 'Student' }));
+    else if ((notificationType === 'teacher-cancellation' || notificationType === 'external-cancellation') && recipientType === 'student') sendStudentCancellationConfirmationEmail_(recipientEmail, details);
+    else throw new Error('Unsupported notification job type.');
+    const sentAt = Date.now();
+    try {
+      firestorePatchAdmin_(config, 'notificationJobs/' + encodeURIComponent(jobId), { state: 'sent', sentAt: sentAt, lastAttemptAt: sentAt, nextRetryAt: 0, lastError: '' });
+      firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), notificationBookingStatusFields_(recipientType, 'sent', nextAttempts, '', sentAt, 0));
+    } catch (markerErr) {
+      console.error('Email was accepted but its durable sent marker could not be written for ' + jobId + ': ' + sanitizeNotificationError_(markerErr));
+      return { state: 'processing', error: 'Delivery accepted; sent-marker write requires manual reconciliation.' };
+    }
+    return { state: 'sent' };
+  } catch (err) {
+    const error = sanitizeNotificationError_(err);
+    const permanent = /invalid|malformed|recipient|address not found/i.test(error) || nextAttempts >= 8;
+    const state = permanent ? 'failed' : 'pending';
+    const nextRetryAt = permanent ? 0 : notificationRetryAt_(nextAttempts);
+    firestorePatchAdmin_(config, 'notificationJobs/' + encodeURIComponent(jobId), { state: state, attempts: nextAttempts, lastAttemptAt: Date.now(), nextRetryAt: nextRetryAt, lastError: error, deliveryStartedAt: 0 });
+    firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), notificationBookingStatusFields_(recipientType, state, nextAttempts, error, 0, nextRetryAt));
+    return { state: state, error: error };
+  }
+}
+
+function processPendingNotificationJobs_(config, bookingId) {
+  queryNotificationJobsAdmin_(config, 'processing', 50).forEach(function (doc) {
+    if (bookingId && fsString_(doc, 'bookingId') !== bookingId) return;
+    if (fsNumber_(doc, 'deliveryStartedAt') && fsNumber_(doc, 'deliveryStartedAt') < Date.now() - 15 * 60 * 1000) {
+      const jobId = firestoreDocId_(doc);
+      const error = 'Delivery result is ambiguous after an interrupted execution; manual retry is required to avoid an automatic duplicate.';
+      firestorePatchAdmin_(config, 'notificationJobs/' + encodeURIComponent(jobId), { state: 'failed', nextRetryAt: 0, lastError: error, lastAttemptAt: Date.now() });
+      firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(fsString_(doc, 'bookingId')), notificationBookingStatusFields_(fsString_(doc, 'recipientType'), 'failed', fsNumber_(doc, 'attempts'), error, 0, 0));
+    }
+  });
+  const jobs = queryNotificationJobsAdmin_(config, 'pending', 100).filter(function (doc) {
+    return !bookingId || fsString_(doc, 'bookingId') === bookingId;
+  });
+  const results = jobs.map(function (job) { return processOneNotificationJob_(config, job); });
+  return { processed: results.length, sent: results.filter(function (result) { return result.state === 'sent'; }).length };
+}
+
+function retryFailedNotificationJobs_(config) {
+  const failed = queryNotificationJobsAdmin_(config, 'failed', 50);
+  failed.forEach(function (job) {
+    firestorePatchAdmin_(config, 'notificationJobs/' + encodeURIComponent(firestoreDocId_(job)), {
+      state: 'pending', attempts: 0, nextRetryAt: Date.now(), lastError: 'Manual retry requested.'
+    });
+  });
+  return { success: true, retried: failed.length, message: 'Failed notification jobs queued for retry.' };
+}
+
+function ensureLegacyPendingNotificationJobs_(config, booking) {
+  const bookingId = firestoreDocId_(booking);
+  const slot = fsNumber_(booking, 'slot');
+  if (!bookingId || slot + (fsNumber_(booking, 'durationMinutes') || 50) * 60000 < Date.now()) return;
+  const source = fsString_(booking, 'source') || 'student';
+  const definitions = source === 'teacher'
+    ? [{ recipientType: 'student', recipientEmail: fsString_(booking, 'email'), notificationType: 'teacher-created' }]
+    : [
+        { recipientType: 'teacher', recipientEmail: config.notificationEmail, notificationType: 'booking-created' },
+        { recipientType: 'student', recipientEmail: fsString_(booking, 'email'), notificationType: 'booking-created' }
+      ];
+  definitions.forEach(function (definition) {
+    const currentStatus = fsString_(booking, definition.recipientType === 'teacher' ? 'teacherNotificationStatus' : 'studentNotificationStatus');
+    if (currentStatus) return;
+    const jobId = 'booking_' + bookingId.replace(/[^a-zA-Z0-9_-]/g, '_') + '_' + definition.notificationType + '_0_' + definition.recipientType;
+    try { firestoreAdminFetch_(config, '/notificationJobs/' + encodeURIComponent(jobId), { method: 'get' }); return; } catch (err) {}
+    const valid = isValidEmail_(definition.recipientEmail);
+    firestorePatchAdmin_(config, 'notificationJobs/' + encodeURIComponent(jobId), {
+      id: jobId, bookingId: bookingId, recipientType: definition.recipientType,
+      recipientEmail: normalizeEmail_(definition.recipientEmail), notificationType: definition.notificationType,
+      version: 0, state: valid ? 'pending' : 'skipped', attempts: 0, createdAt: Date.now(), createdBy: 'legacy-recovery',
+      sentAt: null, lastAttemptAt: null, nextRetryAt: valid ? Date.now() : 0,
+      lastError: valid ? '' : 'Missing or invalid ' + definition.recipientType + ' email.', idempotencyKey: jobId
+    });
+    const values = {};
+    values[definition.recipientType === 'teacher' ? 'teacherNotificationStatus' : 'studentNotificationStatus'] = valid ? 'pending' : 'skipped';
+    firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), values);
+  });
+}
+
+function createNotificationJobAdmin_(config, bookingId, notificationType, recipientType, recipientEmail, version, createdBy) {
+  const jobId = 'booking_' + bookingId.replace(/[^a-zA-Z0-9_-]/g, '_') + '_' + notificationType + '_' + version + '_' + recipientType;
+  try { firestoreAdminFetch_(config, '/notificationJobs/' + encodeURIComponent(jobId), { method: 'get' }); return jobId; } catch (err) {}
+  const email = normalizeEmail_(recipientEmail);
+  const valid = isValidEmail_(email) || (recipientType === 'teacher' && isValidEmail_(config.notificationEmail));
+  firestorePatchAdmin_(config, 'notificationJobs/' + encodeURIComponent(jobId), {
+    id: jobId, bookingId: bookingId, recipientType: recipientType, recipientEmail: email,
+    notificationType: notificationType, version: version, state: valid ? 'pending' : 'skipped', attempts: 0,
+    createdAt: Date.now(), createdBy: createdBy || 'system', sentAt: null, lastAttemptAt: null,
+    nextRetryAt: valid ? Date.now() : 0, lastError: valid ? '' : 'Missing or invalid ' + recipientType + ' email.', idempotencyKey: jobId
+  });
+  return jobId;
+}
+
+function firestoreDocId_(doc) {
+  const parts = String(doc && doc.name || '').split('/');
+  return parts[parts.length - 1] || '';
+}
+
+function getSlotClaimIds_(slot, durationMinutes) {
+  const bucketMs = 15 * 60 * 1000;
+  const first = Math.floor(Number(slot || 0) / bucketMs);
+  const last = Math.ceil((Number(slot || 0) + Math.max(15, Number(durationMinutes || 50)) * 60000) / bucketMs) - 1;
+  const ids = [];
+  for (let index = first; index <= last; index += 1) ids.push('slot_' + index);
+  return ids;
+}
+
+function patchCalendarSyncResult_(config, bookingId, values) {
+  values.calendarLastCheckedAt = Date.now();
+  firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), values);
+}
+
+function ensureCalendarEventForFirestoreBooking_(config, doc) {
+  const bookingId = firestoreDocId_(doc);
+  const slot = fsNumber_(doc, 'slot');
+  const durationMinutes = Math.max(15, fsNumber_(doc, 'durationMinutes') || 50);
+  const cal = CalendarApp.getCalendarById(config.primaryCalendarId);
+  if (!cal || !bookingId || !slot) throw new Error('Booking or primary calendar is unavailable.');
+  let event = findBookingEvent_(cal, fsString_(doc, 'googleCalendarEventId'), bookingId, slot);
+  if (!event) {
+    const start = new Date(slot);
+    const end = new Date(slot + durationMinutes * 60000);
+    if (hasConflictingEvent_(getBusyCalendarIds_(config), start, end)) throw new Error('Calendar conflict prevents retry.');
+    event = cal.createEvent('Lesson with ' + (fsString_(doc, 'name') || 'Student'), start, end, {
+      description: ['Booked from Farouq Booking', 'Booking ID: ' + bookingId, 'Student: ' + fsString_(doc, 'name'), 'Email: ' + fsString_(doc, 'email'), 'Phone: ' + fsString_(doc, 'phone'), 'Notes: ' + fsString_(doc, 'notes'), 'Timezone: ' + (fsString_(doc, 'timezone') || config.defaultTimeZone)].join('\n')
+    });
+  }
+  let meeting = { eventId: event.getId(), meetingUrl: '' };
+  try { meeting.meetingUrl = event.getHangoutLink() || ''; } catch (err) {}
+  if (!meeting.meetingUrl) meeting = ensureBookingMeetingLink_(config, bookingId, slot);
+  patchCalendarSyncResult_(config, bookingId, {
+    calendarSynced: true, calendarSyncState: 'synced', calendarSyncLastError: '',
+    calendarLastSyncedAt: Date.now(), googleCalendarEventId: meeting.eventId || event.getId(), meetingUrl: meeting.meetingUrl || '',
+  });
+  firestorePatchAdmin_(config, 'publicBookings/' + encodeURIComponent(bookingId), { calendarSynced: true, updatedAt: Date.now() });
+}
+
+function deleteCalendarEventForFirestoreBooking_(config, doc) {
+  const bookingId = firestoreDocId_(doc);
+  const cal = CalendarApp.getCalendarById(config.primaryCalendarId);
+  const event = cal && findBookingEvent_(cal, fsString_(doc, 'googleCalendarEventId'), bookingId, fsNumber_(doc, 'slot'));
+  if (event) event.deleteEvent();
+  patchCalendarSyncResult_(config, bookingId, { calendarDeletePending: false, calendarSyncState: 'synced', calendarSyncLastError: '', calendarLastSyncedAt: Date.now() });
+}
+
+function reconcilePlatformCalendarEvents_(config) {
+  const cal = CalendarApp.getCalendarById(config.primaryCalendarId);
+  if (!cal) throw new Error('Primary calendar not found.');
+  const start = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
+  const end = new Date(Date.now() + 366 * 24 * 60 * 60 * 1000);
+  const events = cal.getEvents(start, end);
+  const byBookingId = {};
+  events.forEach(function (event) {
+    const details = parseEventDetails_(event, config);
+    if (!details.bookingId) return;
+    if (!byBookingId[details.bookingId]) byBookingId[details.bookingId] = [];
+    byBookingId[details.bookingId].push(event);
+  });
+  Object.keys(byBookingId).forEach(function (bookingId) {
+    const matches = byBookingId[bookingId];
+    const event = matches[0];
+    let doc;
+    try { doc = firestoreAdminFetch_(config, '/bookings/' + encodeURIComponent(bookingId), { method: 'get' }); } catch (err) { return; }
+    const oldSlot = fsNumber_(doc, 'slot');
+    const oldDuration = fsNumber_(doc, 'durationMinutes') || 50;
+    const newSlot = event.getStartTime().getTime();
+    const newDuration = Math.max(15, Math.round((event.getEndTime().getTime() - newSlot) / 60000));
+    let meetingUrl = '';
+    try { meetingUrl = event.getHangoutLink() || ''; } catch (err) {}
+    const changed = oldSlot !== newSlot || oldDuration !== newDuration || (meetingUrl && meetingUrl !== fsString_(doc, 'meetingUrl'));
+    const values = {
+      calendarLastCheckedAt: Date.now(), googleCalendarEventId: event.getId(),
+      calendarSyncState: matches.length > 1 ? 'failed' : (changed ? 'externally-modified' : 'synced'),
+      calendarSyncLastError: matches.length > 1 ? 'Duplicate Calendar events detected for this Booking ID.' : '',
+    };
+    if (changed) {
+      const conflictingClaim = getSlotClaimIds_(newSlot, newDuration).some(function (id) {
+        try {
+          const claim = firestoreAdminFetch_(config, '/bookingSlotClaims/' + id, { method: 'get' });
+          return fsString_(claim, 'bookingId') && fsString_(claim, 'bookingId') !== bookingId;
+        } catch (err) { return false; }
+      });
+      if (conflictingClaim) {
+        event.setTime(new Date(oldSlot), new Date(oldSlot + oldDuration * 60000));
+        firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), {
+          calendarSyncState: 'conflict', calendarSyncLastError: 'Direct Calendar move overlaps another platform booking.', calendarLastCheckedAt: Date.now()
+        });
+        return;
+      }
+      const notificationVersion = fsNumber_(doc, 'notificationVersion') + 1;
+      values.slot = newSlot; values.durationMinutes = newDuration; values.consumeAfter = newSlot + newDuration * 60000;
+      values.meetingUrl = meetingUrl; values.updatedAt = Date.now(); values.rescheduledFrom = oldSlot; values.rescheduledAt = Date.now();
+      values.notificationVersion = notificationVersion;
+      values.teacherNotificationStatus = 'pending'; values.studentNotificationStatus = 'pending';
+      createNotificationJobAdmin_(config, bookingId, 'reschedule', 'teacher', config.notificationEmail, notificationVersion, 'calendar-reconciliation');
+      createNotificationJobAdmin_(config, bookingId, 'reschedule', 'student', fsString_(doc, 'email'), notificationVersion, 'calendar-reconciliation');
+      firestorePatchAdmin_(config, 'publicBookings/' + encodeURIComponent(bookingId), { slot: newSlot, durationMinutes: newDuration, status: 'rescheduled', updatedAt: Date.now(), calendarSynced: true });
+      getSlotClaimIds_(oldSlot, oldDuration).forEach(function (id) { firestoreDeleteAdmin_(config, 'bookingSlotClaims/' + id); });
+      getSlotClaimIds_(newSlot, newDuration).forEach(function (id) { firestorePatchAdmin_(config, 'bookingSlotClaims/' + id, { bookingId: bookingId, studentUid: fsString_(doc, 'studentUid'), slot: newSlot, durationMinutes: newDuration, status: 'active', updatedAt: Date.now() }); });
+    }
+    firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), values);
+  });
+  const syncedBookings = queryBookingsAdmin_(config, [{ field: 'calendarSynced', value: true }], 200);
+  syncedBookings.forEach(function (doc) {
+    const bookingId = firestoreDocId_(doc);
+    const status = fsString_(doc, 'status') || 'booked';
+    const slot = fsNumber_(doc, 'slot');
+    const duration = fsNumber_(doc, 'durationMinutes') || 50;
+    if (status === 'canceled' || slot + duration * 60000 <= Date.now() || byBookingId[bookingId]) return;
+    const studentUid = fsString_(doc, 'studentUid');
+    firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), {
+      status: 'canceled', canceledAt: Date.now(), canceledBy: 'external-calendar',
+      reservationStatus: 'released', reservationReleasedAt: Date.now(),
+      calendarSynced: false, calendarSyncState: 'externally-deleted',
+      calendarSyncLastError: 'The platform Calendar event was deleted directly in Google Calendar.', calendarLastCheckedAt: Date.now(), updatedAt: Date.now()
+    });
+    firestorePatchAdmin_(config, 'publicBookings/' + encodeURIComponent(bookingId), { status: 'canceled', calendarSynced: false, updatedAt: Date.now() });
+    getSlotClaimIds_(slot, duration).forEach(function (id) { firestoreDeleteAdmin_(config, 'bookingSlotClaims/' + id); });
+    const notificationVersion = fsNumber_(doc, 'notificationVersion') + 1;
+    const externalJobId = 'booking_' + bookingId.replace(/[^a-zA-Z0-9_-]/g, '_') + '_external-cancellation_' + notificationVersion + '_student';
+    const studentEmail = normalizeEmail_(fsString_(doc, 'email'));
+    const validStudentEmail = isValidEmail_(studentEmail);
+    firestorePatchAdmin_(config, 'notificationJobs/' + externalJobId, {
+      id: externalJobId, bookingId: bookingId, recipientType: 'student', recipientEmail: studentEmail,
+      notificationType: 'external-cancellation', version: notificationVersion,
+      state: validStudentEmail ? 'pending' : 'skipped', attempts: 0, createdAt: Date.now(), createdBy: 'external-calendar',
+      sentAt: null, lastAttemptAt: null, nextRetryAt: validStudentEmail ? Date.now() : 0,
+      lastError: validStudentEmail ? '' : 'Missing or invalid student email.', idempotencyKey: externalJobId
+    });
+    firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), {
+      notificationVersion: notificationVersion, studentNotificationStatus: validStudentEmail ? 'pending' : 'skipped',
+      studentNotificationAttempts: 0, studentNotificationLastError: validStudentEmail ? '' : 'Missing or invalid student email.'
+    });
+    if (studentUid && fsString_(doc, 'reservationStatus') === 'reserved') {
+      try {
+        const userDoc = firestoreAdminFetch_(config, '/users/' + encodeURIComponent(studentUid), { method: 'get' });
+        firestorePatchAdmin_(config, 'users/' + encodeURIComponent(studentUid), {
+          reservedLessonCredits: Math.max(0, fsNumber_(userDoc, 'reservedLessonCredits') - 1), entitlementUpdatedAt: Date.now()
+        });
+      } catch (err) {}
+    }
+  });
+  return byBookingId;
+}
+
+function processCalendarSynchronization() {
+  const config = getConfig_();
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  let processed = 0;
+  let failed = 0;
+  try {
+    const pendingCreates = queryBookingsAdmin_(config, [{ field: 'calendarSynced', value: false }], 50);
+    pendingCreates.forEach(function (doc) {
+      ensureLegacyPendingNotificationJobs_(config, doc);
+      const bookingId = firestoreDocId_(doc);
+      if (fsString_(doc, 'calendarSyncState') === 'externally-deleted' || fsNumber_(doc, 'calendarNextRetryAt') > Date.now()) return;
+      const attempts = fsNumber_(doc, 'calendarSyncAttempts') + 1;
+      try {
+        if (fsString_(doc, 'status') === 'canceled' || fsBool_(doc, 'calendarDeletePending')) deleteCalendarEventForFirestoreBooking_(config, doc);
+        else ensureCalendarEventForFirestoreBooking_(config, doc);
+        patchCalendarSyncResult_(config, bookingId, { calendarSyncAttempts: attempts, calendarNextRetryAt: 0 });
+        processed += 1;
+      } catch (err) {
+        patchCalendarSyncResult_(config, bookingId, { calendarSyncState: 'failed', calendarSyncAttempts: attempts, calendarSyncLastError: String(err && err.message || err), calendarNextRetryAt: Date.now() + Math.min(6 * 60 * 60 * 1000, Math.pow(2, Math.min(attempts, 8)) * 60000) });
+        failed += 1;
+      }
+    });
+    reconcilePlatformCalendarEvents_(config);
+    const notificationResult = processPendingNotificationJobs_(config, '');
+    processed += notificationResult.processed;
+  } finally { lock.releaseLock(); }
+  return { success: failed === 0, processed: processed, failed: failed, message: 'Calendar background synchronization finished.' };
+}
+
+function installCalendarSyncTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (trigger) {
+    if (trigger.getHandlerFunction() === 'processCalendarSynchronization') ScriptApp.deleteTrigger(trigger);
+  });
+  ScriptApp.newTrigger('processCalendarSynchronization').timeBased().everyMinutes(5).create();
+  return { success: true, message: 'Automatic Calendar synchronization installed (every 5 minutes).' };
 }
 
 function doGet(e) {
@@ -803,6 +1250,21 @@ function handleRequest_(e) {
     if (action === 'getEmailQuota') {
       requireTeacherCaller_(config, req.authToken);
       return jsonOut(getEmailQuotaPayload_());
+    }
+
+    if (action === 'installCalendarSync') {
+      requireTeacherCaller_(config, req.authToken);
+      return jsonOut(installCalendarSyncTrigger());
+    }
+
+    if (action === 'runCalendarSync') {
+      requireTeacherCaller_(config, req.authToken);
+      return jsonOut(processCalendarSynchronization());
+    }
+
+    if (action === 'retryFailedNotifications') {
+      requireTeacherCaller_(config, req.authToken);
+      return jsonOut(retryFailedNotificationJobs_(config));
     }
 
     if (action === 'getBusy') {
@@ -1011,6 +1473,12 @@ function handleRequest_(e) {
           if (!existingMeetingUrl) {
             recoveredMeeting = ensureBookingMeetingLink_(config, bookingId, slot);
           }
+          firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), {
+            googleCalendarEventId: recoveredMeeting.eventId || existingEvent.getId(), meetingUrl: recoveredMeeting.meetingUrl || '',
+            calendarSynced: true, calendarSyncState: 'synced', calendarLastSyncedAt: Date.now()
+          });
+          processPendingNotificationJobs_(config, bookingId);
+          const notifiedBooking = firestoreAdminFetch_(config, '/bookings/' + encodeURIComponent(bookingId), { method: 'get' });
           return jsonOut({
             success: true,
             message: recoveredMeeting.meetingUrl
@@ -1019,8 +1487,8 @@ function handleRequest_(e) {
             eventId: recoveredMeeting.eventId || existingEvent.getId(),
             meetingUrl: recoveredMeeting.meetingUrl || '',
             calendarInviteSent: false,
-            notificationSent: false,
-            studentConfirmationSent: false,
+            notificationSent: fsString_(notifiedBooking, 'teacherNotificationStatus') === 'sent',
+            studentConfirmationSent: fsString_(notifiedBooking, 'studentNotificationStatus') === 'sent',
           });
         }
         const hasConflict = bookingAccess.role === 'teacher'
@@ -1047,44 +1515,16 @@ function handleRequest_(e) {
         (((event.conferenceData || {}).entryPoints || []).filter(function (entry) {
           return entry.entryPointType === 'video';
         })[0] || {}).uri || '';
-      var notificationSent = false;
-      var studentConfirmationSent = false;
-      var notificationError = '';
-      var studentConfirmationError = '';
-      var slotLabel = Utilities.formatDate(start, timeZone, 'yyyy-MM-dd HH:mm');
-      try {
-        notificationSent = sendBookingNotificationEmail_(teacherEmail, {
-          name: name,
-          email: email,
-          phone: phone,
-          notes: notes,
-          bookingId: bookingId,
-          timeZone: timeZone,
-          slotLabel: slotLabel,
-          meetingUrl: meetingUrl
-        });
-        if (!notificationSent) {
-          notificationError = teacherEmail ? 'Teacher notification email was not accepted.' : 'Teacher email is missing.';
-        }
-      } catch (mailErr) {
-        notificationError = mailErr && mailErr.message ? mailErr.message : String(mailErr);
-      }
-      if (isValidEmail_(email)) {
-        try {
-          studentConfirmationSent = sendStudentConfirmationEmail_(email, {
-            name: name,
-            bookingId: bookingId,
-            timeZone: timeZone,
-            slotLabel: slotLabel,
-            meetingUrl: meetingUrl
-          });
-          if (!studentConfirmationSent) {
-            studentConfirmationError = email ? 'Student confirmation email was not accepted.' : 'Student email is missing.';
-          }
-        } catch (mailErr) {
-          studentConfirmationError = mailErr && mailErr.message ? mailErr.message : String(mailErr);
-        }
-      }
+      firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), {
+        googleCalendarEventId: event.iCalUID || event.id, meetingUrl: meetingUrl,
+        calendarSynced: true, calendarSyncState: 'synced', calendarLastSyncedAt: Date.now()
+      });
+      processPendingNotificationJobs_(config, bookingId);
+      const notifiedBooking = firestoreAdminFetch_(config, '/bookings/' + encodeURIComponent(bookingId), { method: 'get' });
+      var notificationSent = fsString_(notifiedBooking, 'teacherNotificationStatus') === 'sent';
+      var studentConfirmationSent = fsString_(notifiedBooking, 'studentNotificationStatus') === 'sent';
+      var notificationError = fsString_(notifiedBooking, 'teacherNotificationLastError');
+      var studentConfirmationError = fsString_(notifiedBooking, 'studentNotificationLastError');
       return jsonOut({
         success: true,
         message: 'Booking added to Google Calendar.',
@@ -1143,23 +1583,10 @@ function handleRequest_(e) {
       }
       var cancellationNotificationSent = false;
       var cancellationNotificationError = '';
-      try {
-        cancellationNotificationSent = sendBookingCancellationEmail_(teacherEmail, {
-          name: name,
-          email: email,
-          phone: phone,
-          notes: notes,
-          bookingId: bookingId,
-          timeZone: timeZone,
-          slotLabel: slot ? Utilities.formatDate(new Date(slot), timeZone, 'yyyy-MM-dd HH:mm') : '',
-          canceledBy: canceledBy
-        });
-        if (!cancellationNotificationSent) {
-          cancellationNotificationError = teacherEmail ? 'Cancellation notification email was not accepted.' : 'Teacher email is missing.';
-        }
-      } catch (mailErr) {
-        cancellationNotificationError = mailErr && mailErr.message ? mailErr.message : String(mailErr);
-      }
+      processPendingNotificationJobs_(config, bookingId);
+      const canceledBookingState = firestoreAdminFetch_(config, '/bookings/' + encodeURIComponent(bookingId), { method: 'get' });
+      cancellationNotificationSent = fsString_(canceledBookingState, canceledBy === 'Student' ? 'teacherNotificationStatus' : 'studentNotificationStatus') === 'sent';
+      cancellationNotificationError = fsString_(canceledBookingState, canceledBy === 'Student' ? 'teacherNotificationLastError' : 'studentNotificationLastError');
       return jsonOut({
         success: true,
         message: alreadyDeleted ? 'Calendar event was already removed.' : 'Calendar event deleted.',
@@ -1228,18 +1655,6 @@ function handleRequest_(e) {
         meetingUrl = event.getHangoutLink() || '';
       } catch (hangoutErr) {}
       let studentNotificationSent = false;
-      try {
-        studentNotificationSent = sendStudentScheduleUpdateEmail_(
-          fsString_(bookingAccess.booking, 'email'),
-          {
-            name: fsString_(bookingAccess.booking, 'name'),
-            slotLabel: Utilities.formatDate(newStart, config.defaultTimeZone, 'yyyy-MM-dd HH:mm'),
-            durationMinutes: Math.round(durationMs / 60000),
-            timeZone: config.defaultTimeZone,
-            meetingUrl: meetingUrl,
-          }
-        );
-      } catch (notificationErr) {}
       return jsonOut({
         success: true,
         message: 'Google Calendar event rescheduled.',

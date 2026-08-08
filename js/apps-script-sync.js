@@ -241,6 +241,10 @@ async function syncPendingBookingsViaAppsScript({ limit = 10 } = {}) {
                 if (deleteResult?.success) {
                     await window.db.collection("bookings").doc(doc.id).set({
                         calendarDeletePending: false,
+                        calendarSyncState: "synced",
+                        calendarLastSyncedAt: Date.now(),
+                        calendarLastCheckedAt: Date.now(),
+                        calendarSyncLastError: "",
                         updatedAt: Date.now(),
                         history: window.firebase.firestore.FieldValue.arrayUnion({
                             at: Date.now(),
@@ -269,6 +273,10 @@ async function syncPendingBookingsViaAppsScript({ limit = 10 } = {}) {
             if (result?.success) {
                 await window.db.collection("bookings").doc(doc.id).set({
                     calendarSynced: true,
+                    calendarSyncState: "synced",
+                    calendarLastSyncedAt: Date.now(),
+                    calendarLastCheckedAt: Date.now(),
+                    calendarSyncLastError: "",
                     googleCalendarEventId: result.eventId || null,
                     meetingUrl: result.meetingUrl || "",
                     history: window.firebase.firestore.FieldValue.arrayUnion({
@@ -283,6 +291,13 @@ async function syncPendingBookingsViaAppsScript({ limit = 10 } = {}) {
                 }, { merge: true });
                 syncedCount += 1;
             } else {
+                await window.db.collection("bookings").doc(doc.id).set({
+                    calendarSyncState: "failed",
+                    calendarSyncAttempts: Number(booking.calendarSyncAttempts || 0) + 1,
+                    calendarLastCheckedAt: Date.now(),
+                    calendarSyncLastError: result?.message || "Unknown Apps Script error",
+                    calendarNextRetryAt: Date.now() + 5 * 60 * 1000,
+                }, { merge: true });
                 failedCount += 1;
                 const slotLabel = booking.slot
                     ? new Date(Number(booking.slot)).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })
@@ -303,6 +318,18 @@ async function syncPendingBookingsViaAppsScript({ limit = 10 } = {}) {
     }
 }
 
+async function installAutomaticCalendarSync() {
+    return callAppsScript("installCalendarSync");
+}
+
+async function runAutomaticCalendarSyncNow() {
+    return callAppsScript("runCalendarSync");
+}
+
+async function retryFailedNotifications() {
+    return callAppsScript("retryFailedNotifications");
+}
+
 window.saveAppsScriptSettings = saveAppsScriptSettings;
 window.testAppsScriptConnection = testAppsScriptConnection;
 window.fetchBusyBlocksFromAppsScript = fetchBusyBlocksFromAppsScript;
@@ -317,3 +344,6 @@ window.createBookingViaAppsScript = createBookingViaAppsScript;
 window.deleteBookingViaAppsScript = deleteBookingViaAppsScript;
 window.rescheduleBookingViaAppsScript = rescheduleBookingViaAppsScript;
 window.syncPendingBookingsViaAppsScript = syncPendingBookingsViaAppsScript;
+window.installAutomaticCalendarSync = installAutomaticCalendarSync;
+window.runAutomaticCalendarSyncNow = runAutomaticCalendarSyncNow;
+window.retryFailedNotifications = retryFailedNotifications;

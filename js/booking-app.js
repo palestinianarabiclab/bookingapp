@@ -13,6 +13,18 @@ import {
     submitGuestBooking,
 } from "./logic/guestBookingFlow.js?v=20260726-booking-recovery-v1";
 import {
+    getAvailableLessonCredits,
+    getBookingSlotClaimIds,
+    getLegacyLessonCredits,
+    getLessonConsumeAfter,
+    isConsumptionEligible,
+    isLessonHistorical,
+    makeBookingOperationId,
+} from "./logic/bookingBalance.js?v=20260808-phase1-balance-v1";
+import { dedupeCalendarBusyBlocks } from "./logic/calendarSyncState.js?v=20260808-phase2-sync-v1";
+import { createNotificationJob } from "./logic/notificationJobs.js?v=20260808-phase3-notifications-v1";
+import { resolvePriceSnapshot, pricingDifference, historicalPriceLabel, validPrice } from "./logic/lessonPricing.js?v=20260808-phase45-pricing-v1";
+import {
     renderTeacherBookings,
     cancelBooking,
     rescheduleBooking,
@@ -82,6 +94,8 @@ const state = {
     currentUser: null,
     currentRole: "",
     studentProfile: null,
+    studentEntitlement: null,
+    defaultLessonPrice: 0,
     studentAuthMode: "login",
     teacherUser: null,
     teacherRole: "",
@@ -96,8 +110,13 @@ const state = {
     studentCache: new Map(),
     googleCalendarMessage: "",
     busyRefreshTimer: null,
+    teacherBusyRefreshTimer: null,
+    teacherBookingsUnsubscribe: null,
+    teacherBookingsRefreshTimer: null,
+    studentBookingsRefreshTimer: null,
     balanceReconcileTimer: null,
     studentProfileUnsubscribe: null,
+    studentEntitlementUnsubscribe: null,
     lessonFeedbackRatings: {
         preparation: 0,
         clarity: 0,
@@ -731,25 +750,19 @@ function formatMoney(value) {
 }
 
 function getStudentBalance() {
-    return toMoneyValue(state.studentProfile?.balance);
+    return Math.max(0, Number(state.studentEntitlement?.lessonCredits || state.studentProfile?.lessonCredits || 0));
 }
 
 function getStudentLessonPrice() {
-    return getConfiguredLessonPrice();
+    return 0;
 }
 
 function getConfiguredLessonPrice() {
-    const match = String(state.profileSettings?.rateText || "").replace(/,/g, "").match(/\d+(?:\.\d+)?/);
-    return match ? toMoneyValue(match[0]) : 0;
+    return state.teacherRole === "teacher" ? (validPrice(state.defaultLessonPrice) || 0) : 0;
 }
 
-function getStudentTotalLessonCredits(profile = state.studentProfile || {}, balance = Number(profile.balance || 0), lessonPrice = getConfiguredLessonPrice()) {
-    if (Number.isFinite(Number(profile.lessonCredits))) {
-        const packageCredits = Math.max(0, Math.floor(Number(profile.lessonCredits || 0)));
-        const legacyCredits = lessonPrice > 0 ? Math.max(0, Math.floor((balance - Number(profile.totalPaid || 0)) / lessonPrice)) : 0;
-        return packageCredits + legacyCredits;
-    }
-    return lessonPrice > 0 ? Math.max(0, Math.floor(balance / lessonPrice)) : 0;
+function getStudentTotalLessonCredits(profile = state.studentEntitlement || state.studentProfile || {}) {
+    return Math.max(0, Number(profile.lessonCredits || 0));
 }
 
 function isUnchargedPaidBooking(booking) {
@@ -758,11 +771,79 @@ function isUnchargedPaidBooking(booking) {
 }
 
 async function countReservedPaidLessons(studentUid) {
-    if (!window.db || !studentUid) return 0;
-    const snap = await window.db.collection("bookings").where("studentUid", "==", studentUid).limit(200).get();
-    let count = 0;
-    snap.forEach((doc) => { if (isUnchargedPaidBooking(doc.data() || {})) count += 1; });
-    return count;
+    if (!studentUid) return 0;
+    if (studentUid === state.currentUser?.uid && state.studentEntitlement) {
+        return Math.max(0, Number(state.studentEntitlement.reservedLessonCredits || 0));
+    }
+    const snap = await window.db.collection("studentEntitlements").doc(studentUid).get();
+    return snap.exists ? Math.max(0, Number(snap.data()?.reservedLessonCredits || 0)) : 0;
+}
+
+async function getStudentBillingForBooking(studentUid) {
+    const legacyReserved = await countReservedPaidLessons(studentUid);
+    return { legacyReserved };
+}
+
+async function commitBookingWithBilling({ bookingRef, bookingData, publicBookingData, billing }) {
+    const userRef = window.db.collection("users").doc(bookingData.studentUid);
+    const entitlementRef = window.db.collection("studentEntitlements").doc(bookingData.studentUid);
+    const publicRef = window.db.collection("publicBookings").doc(bookingRef.id);
+    const trialRef = window.db.collection("trialClaims").doc(bookingData.studentUid);
+    await window.db.runTransaction(async (transaction) => {
+        const claimRefs = getBookingSlotClaimIds(bookingData.slot, bookingData.durationMinutes)
+            .map((id) => window.db.collection("bookingSlotClaims").doc(id));
+        const [existingBooking, userSnap, entitlementSnap, claimSnaps] = await Promise.all([
+            transaction.get(bookingRef),
+            transaction.get(userRef),
+            transaction.get(entitlementRef),
+            Promise.all(claimRefs.map((ref) => transaction.get(ref))),
+        ]);
+        if (existingBooking.exists) return;
+        if (!userSnap.exists) throw new Error("Student account was not found.");
+        if (claimSnaps.some((snap) => snap.exists && snap.data()?.bookingId !== bookingRef.id)) {
+            throw new Error("That time was just taken. Please choose another lesson time.");
+        }
+        const profile = entitlementSnap.exists ? (entitlementSnap.data() || {}) : (userSnap.data() || {});
+        if (bookingData.isFreeTrial !== true && profile.allowOverdraft !== true) {
+            const available = Math.max(0, Number(profile.lessonCredits || 0) - Number(profile.reservedLessonCredits || billing?.legacyReserved || 0));
+            if (available < 1) throw new Error("You have no unreserved lesson credit left.");
+        }
+        transaction.set(bookingRef, bookingData);
+        transaction.set(publicRef, publicBookingData);
+        const bookingJobs = [
+            createNotificationJob({ bookingId: bookingRef.id, notificationType: "booking-created", recipientType: "teacher", recipientEmail: state.contactSettings?.email || "", version: 0, createdAt: bookingData.createdAt, createdBy: "student", deferInvalid: true }),
+            createNotificationJob({ bookingId: bookingRef.id, notificationType: "booking-created", recipientType: "student", recipientEmail: bookingData.email, version: 0, createdAt: bookingData.createdAt, createdBy: "student" }),
+        ];
+        bookingJobs.forEach((job) => transaction.set(window.db.collection("notificationJobs").doc(job.id), job));
+        transaction.set(bookingRef, {
+            teacherNotificationStatus: bookingJobs[0].state,
+            teacherNotificationLastError: bookingJobs[0].lastError,
+            studentNotificationStatus: bookingJobs[1].state,
+            studentNotificationLastError: bookingJobs[1].lastError,
+        }, { merge: true });
+        claimRefs.forEach((ref) => transaction.set(ref, {
+            bookingId: bookingRef.id, studentUid: bookingData.studentUid,
+            slot: bookingData.slot, durationMinutes: bookingData.durationMinutes,
+            status: "active", updatedAt: Date.now(),
+        }));
+        if (bookingData.isFreeTrial === true) {
+            transaction.set(trialRef, {
+                studentUid: bookingData.studentUid,
+                bookingId: bookingRef.id,
+                createdAt: Date.now(),
+            });
+        } else {
+            const currentReserved = Number.isFinite(Number(profile.reservedLessonCredits))
+                ? Math.max(0, Number(profile.reservedLessonCredits))
+                : Math.max(0, Number(billing?.legacyReserved || 0));
+            transaction.set(entitlementRef, {
+                studentUid: bookingData.studentUid,
+                lessonCredits: Math.max(0, Number(profile.lessonCredits || 0)),
+                reservedLessonCredits: currentReserved + 1,
+                entitlementUpdatedAt: Date.now(),
+            }, { merge: true });
+        }
+    });
 }
 
 function updateStudentBalanceUi() {
@@ -772,18 +853,12 @@ function updateStudentBalanceUi() {
     }
     if (!signedIn) return;
     
-    const balance = getStudentBalance();
-    const configuredLessonPrice = getConfiguredLessonPrice();
-    const lessonPrice = getStudentLessonPrice() > 0 ? getStudentLessonPrice() : configuredLessonPrice;
-    
     if (els.studentBalanceValue) {
-        els.studentBalanceValue.textContent = formatMoney(balance);
+        els.studentBalanceValue.textContent = String(getStudentTotalLessonCredits());
     }
     
     if (els.studentLessonPriceValue) {
-        els.studentLessonPriceValue.textContent = lessonPrice > 0
-            ? `Your lesson price: ${formatMoney(lessonPrice)}`
-            : "Lesson price is not configured yet";
+        els.studentLessonPriceValue.textContent = `${Number(state.studentEntitlement?.reservedLessonCredits || 0)} reserved`;
     }
 
     const remainingBadge = document.getElementById("studentRemainingLessonsBadge");
@@ -815,6 +890,9 @@ function updateStudentBalanceUi() {
 
     const transactionsList = document.getElementById("studentTransactionsList");
     if (transactionsList) {
+        transactionsList.hidden = true;
+        transactionsList.replaceChildren();
+        return;
         const profile = state.studentProfile || {};
         const txs = profile.transactions || [];
         if (!txs.length) {
@@ -857,7 +935,7 @@ function updateStudentBalanceUi() {
 function updateCourseAccessRequestUi() {
     const signedIn = isStudentSignedIn();
     const studentProfile = state.studentProfile || {};
-    const balance = Number(studentProfile.balance || 0);
+    const availableLessons = Math.max(0, Number(state.studentEntitlement?.lessonCredits || 0) - Number(state.studentEntitlement?.reservedLessonCredits || 0));
     const requested = (studentProfile.courseAccessRequested === true || studentProfile.paymentStatus === "pending")
         && Number(studentProfile.requestedAmount || 0) > 0
         && Number(studentProfile.requestedLessons || 0) > 0;
@@ -877,10 +955,8 @@ function updateCourseAccessRequestUi() {
         if (!signedIn) {
             msgEl.textContent = "Sign in first to choose a package and request account credit.";
             msgEl.className = "status-line";
-        } else if (balance > 0) {
-            const lessonPrice = getConfiguredLessonPrice();
-            const remainingLessons = Math.floor(balance / lessonPrice);
-            msgEl.textContent = `Active Credit Balance: $${balance.toFixed(2)} (~${remainingLessons} lesson${remainingLessons === 1 ? "" : "s"} remaining).`;
+        } else if (availableLessons > 0) {
+            msgEl.textContent = `${availableLessons} lesson${availableLessons === 1 ? "" : "s"} available to book.`;
             msgEl.className = "status-line status-line--success";
         } else if (requested) {
             msgEl.textContent = `⏳ Payment notification sent for ${requestedPkg}. Waiting for teacher verification.`;
@@ -1006,6 +1082,8 @@ function stopStudentProfileListener() {
         state.studentProfileUnsubscribe();
     }
     state.studentProfileUnsubscribe = null;
+    if (typeof state.studentEntitlementUnsubscribe === "function") state.studentEntitlementUnsubscribe();
+    state.studentEntitlementUnsubscribe = null;
 }
 
 function startStudentProfileListener() {
@@ -1021,6 +1099,11 @@ function startStudentProfileListener() {
         }, (error) => {
             console.warn("Could not watch student profile.", error);
         });
+    state.studentEntitlementUnsubscribe = window.db.collection("studentEntitlements").doc(state.currentUser.uid)
+        .onSnapshot((snap) => {
+            state.studentEntitlement = snap.exists ? (snap.data() || {}) : null;
+            updateStudentAuthUi();
+        }, (error) => console.warn("Could not watch student entitlement.", error));
 }
 
 function setSelectedSlot(slotMs) {
@@ -1174,15 +1257,8 @@ async function refreshRuntimeBusyBlocksNow({ force = false, minDays = 0 } = {}) 
         });
         state.busySyncReady = !!(result?.success && Array.isArray(result.busyBlocks));
         state.busySyncMessage = state.busySyncReady ? "" : (result?.message || "Could not reach Google Calendar sync.");
-        const seenBusyIntervals = new Set();
         state.runtimeBusyBlocks = state.busySyncReady
-            ? [...result.busyBlocks]
-                .filter((block) => {
-                    const key = `${Number(block?.startMs || 0)}:${Number(block?.endMs || 0)}`;
-                    if (seenBusyIntervals.has(key)) return false;
-                    seenBusyIntervals.add(key);
-                    return true;
-                })
+            ? dedupeCalendarBusyBlocks([...result.busyBlocks], new Set(Array.from(state.bookingCache?.keys?.() || [])))
                 .sort((a, b) => Number(a.startMs || 0) - Number(b.startMs || 0))
             : [];
         state.busyBlocksRangeDays = state.busySyncReady ? requestedDays : 0;
@@ -1221,6 +1297,62 @@ function startGoogleBusyAutoRefresh() {
         if (!studentScreen?.classList.contains("app-screen--active")) return;
         ensureBookingCalendarLoaded({ force: true }).catch(console.error);
     }, GOOGLE_BUSY_REFRESH_MS);
+}
+
+function stopGoogleBusyAutoRefresh() {
+    if (state.busyRefreshTimer) window.clearInterval(state.busyRefreshTimer);
+    state.busyRefreshTimer = null;
+}
+
+async function refreshTeacherCalendarAutomatically({ force = false } = {}) {
+    if (!state.teacherUser || state.teacherRole !== "teacher") return;
+    await refreshRuntimeBusyBlocks({ force, minDays: 31 });
+    renderTeacherWeekCalendar();
+}
+
+function stopTeacherCalendarAutoRefresh() {
+    if (state.teacherBusyRefreshTimer) window.clearInterval(state.teacherBusyRefreshTimer);
+    state.teacherBusyRefreshTimer = null;
+}
+
+function startTeacherCalendarAutoRefresh() {
+    stopTeacherCalendarAutoRefresh();
+    if (!state.teacherUser || state.teacherRole !== "teacher") return;
+    state.teacherBusyRefreshTimer = window.setInterval(() => {
+        const teacherScreen = document.getElementById("teacher-screen");
+        if (document.hidden || !teacherScreen?.classList.contains("app-screen--active")) return;
+        refreshTeacherCalendarAutomatically({ force: true }).catch(console.error);
+    }, GOOGLE_BUSY_REFRESH_MS);
+}
+
+function stopTeacherBookingsListener() {
+    if (typeof state.teacherBookingsUnsubscribe === "function") state.teacherBookingsUnsubscribe();
+    state.teacherBookingsUnsubscribe = null;
+    if (state.teacherBookingsRefreshTimer) window.clearTimeout(state.teacherBookingsRefreshTimer);
+    state.teacherBookingsRefreshTimer = null;
+}
+
+function startTeacherBookingsListener() {
+    stopTeacherBookingsListener();
+    if (!window.db || !state.teacherUser || state.teacherRole !== "teacher") return;
+    const historyStart = Date.now() - 60 * 24 * 60 * 60 * 1000;
+    state.teacherBookingsUnsubscribe = window.db.collection("bookings").where("slot", ">=", historyStart)
+        .onSnapshot(() => {
+            if (state.teacherBookingsRefreshTimer) window.clearTimeout(state.teacherBookingsRefreshTimer);
+            state.teacherBookingsRefreshTimer = window.setTimeout(() => {
+                state.teacherBookingsRefreshTimer = null;
+                refreshTeacherBookings().catch(console.error);
+            }, 300);
+        }, (error) => console.warn("Teacher booking live refresh failed.", error));
+}
+
+if (typeof window !== "undefined") {
+    window.addEventListener("focus", () => {
+        if (state.teacherRole === "teacher") refreshTeacherCalendarAutomatically({ force: true }).catch(console.error);
+    });
+    document.addEventListener("visibilitychange", () => {
+        if (!document.hidden && state.teacherRole === "teacher") refreshTeacherCalendarAutomatically({ force: true }).catch(console.error);
+    });
 }
 
 async function loadPublicSettings({ force = false } = {}) {
@@ -1864,7 +1996,7 @@ async function loadStudentBookings() {
         let upcomingBookings = rows.filter((b) => {
             const status = (b.status || "booked").toLowerCase();
             if (status === "canceled" || status === "completed") return false;
-            return Number(b.slot || 0) + 50 * 60 * 1000 >= now;
+            return !isLessonHistorical(b, now);
         });
 
         // Update the upcoming lesson countdown banner
@@ -1873,7 +2005,7 @@ async function loadStudentBookings() {
         const takenBookings = rows.filter((b) => {
             const status = (b.status || "booked").toLowerCase();
             if (status === "canceled") return false;
-            return status === "completed" || Number(b.slot || 0) + 50 * 60 * 1000 < now;
+            return status === "completed" || isLessonHistorical(b, now);
         });
 
         const canceledBookings = rows.filter((b) => {
@@ -2308,47 +2440,72 @@ function stopStudentBookingsListener() {
         state.studentBookingsUnsubscribe();
     }
     state.studentBookingsUnsubscribe = null;
+    if (state.studentBookingsRefreshTimer) window.clearTimeout(state.studentBookingsRefreshTimer);
+    state.studentBookingsRefreshTimer = null;
 }
 
 function startStudentBookingsListener() {
     stopStudentBookingsListener();
+    if (!window.db || !state.currentUser || state.currentRole !== "student") return;
+    state.studentBookingsUnsubscribe = window.db.collection("bookings").where("studentUid", "==", state.currentUser.uid)
+        .onSnapshot(() => {
+            if (state.studentBookingsRefreshTimer) window.clearTimeout(state.studentBookingsRefreshTimer);
+            state.studentBookingsRefreshTimer = window.setTimeout(() => {
+                state.studentBookingsRefreshTimer = null;
+                loadStudentBookings().catch(console.error);
+            }, 250);
+        }, (error) => console.warn("Student booking live refresh failed.", error));
 }
 
 async function cancelStudentBooking(bookingId) {
-    const snap = await window.db.collection("bookings").doc(bookingId).get();
-    const booking = snap.data() || {};
-    if (booking.studentUid !== state.currentUser?.uid) throw new Error("This booking does not belong to your account.");
-    const isLateCancel = Number(booking.slot || 0) - Date.now() < STUDENT_CHANGE_CUTOFF_MS;
+    const bookingRef = window.db.collection("bookings").doc(bookingId);
+    const userRef = window.db.collection("users").doc(state.currentUser.uid);
+    const entitlementRef = window.db.collection("studentEntitlements").doc(state.currentUser.uid);
+    let booking = {};
+    let alreadyCanceled = false;
     const canceledAt = Date.now();
-    const cancelBatch = window.db.batch();
-    cancelBatch.set(window.db.collection("bookings").doc(bookingId), {
-        status: "canceled",
-        updatedAt: canceledAt,
-        calendarSynced: false,
-        calendarDeletePending: true,
-        canceledAt,
-        canceledBy: "student",
-        history: window.firebase.firestore.FieldValue.arrayUnion({
-            at: canceledAt,
-            action: "canceled",
-            by: "student",
-            lateChargeApplies: isLateCancel,
-        }),
-    }, { merge: true });
-    cancelBatch.set(window.db.collection("publicBookings").doc(bookingId), {
-        status: "canceled",
-        updatedAt: canceledAt,
-        calendarSynced: false,
-    }, { merge: true });
-    if (booking.isFreeTrial === true && booking.studentUid) {
-        cancelBatch.set(window.db.collection("users").doc(booking.studentUid), {
-            trialUsed: false,
-            trialUsedAt: window.firebase.firestore.FieldValue.delete(),
-            updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
+    await window.db.runTransaction(async (transaction) => {
+        const [snap, userSnap, entitlementSnap] = await Promise.all([transaction.get(bookingRef), transaction.get(userRef), transaction.get(entitlementRef)]);
+        if (!snap.exists) throw new Error("Booking was not found.");
+        booking = snap.data() || {};
+        if (booking.studentUid !== state.currentUser?.uid) throw new Error("This booking does not belong to your account.");
+        if (String(booking.status || "").toLowerCase() === "canceled") {
+            alreadyCanceled = true;
+            return;
+        }
+        const isLateCancel = Number(booking.slot || 0) - canceledAt < STUDENT_CHANGE_CUTOFF_MS;
+        const notificationVersion = Number(booking.notificationVersion || 0) + 1;
+        transaction.set(bookingRef, {
+            status: "canceled", updatedAt: canceledAt, calendarSynced: false,
+            calendarDeletePending: true, canceledAt, canceledBy: "student",
+            calendarSyncState: "pending-delete", calendarNextRetryAt: canceledAt,
+            reservationStatus: isLateCancel ? "pending-late-consumption" : "released",
+            reservationReleasedAt: isLateCancel ? null : canceledAt,
+            notificationVersion,
+            teacherNotificationStatus: "pending",
+            history: window.firebase.firestore.FieldValue.arrayUnion({
+                at: canceledAt, action: "canceled", by: "student", lateChargeApplies: isLateCancel,
+            }),
         }, { merge: true });
-        cancelBatch.delete(window.db.collection("trialClaims").doc(booking.studentUid));
-    }
-    await cancelBatch.commit();
+        transaction.set(window.db.collection("publicBookings").doc(bookingId), {
+            status: "canceled", updatedAt: canceledAt, calendarSynced: false,
+        }, { merge: true });
+        getBookingSlotClaimIds(booking.slot, booking.durationMinutes || booking.slotMinutes || 50)
+            .forEach((id) => transaction.delete(window.db.collection("bookingSlotClaims").doc(id)));
+        const cancelJob = createNotificationJob({ bookingId, notificationType: "student-cancellation", recipientType: "teacher", recipientEmail: state.contactSettings?.email || "", version: notificationVersion, createdAt: canceledAt, createdBy: "student", deferInvalid: true });
+        transaction.set(window.db.collection("notificationJobs").doc(cancelJob.id), cancelJob);
+        const releasablePaidReservation = booking.isFreeTrial !== true && !booking.balanceChargedAt && !booking.balanceCharged &&
+            !["released", "consumed", "not-required"].includes(String(booking.reservationStatus || ""));
+        if (!isLateCancel && releasablePaidReservation && entitlementSnap.exists) {
+            const current = Math.max(0, Number(entitlementSnap.data()?.reservedLessonCredits || 0));
+            transaction.set(entitlementRef, { reservedLessonCredits: Math.max(0, current - 1), entitlementUpdatedAt: canceledAt }, { merge: true });
+        }
+        if (booking.isFreeTrial === true) {
+            transaction.set(userRef, { trialUsed: false, trialUsedAt: window.firebase.firestore.FieldValue.delete(), updatedAt: window.firebase.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            transaction.delete(window.db.collection("trialClaims").doc(booking.studentUid));
+        }
+    });
+    if (alreadyCanceled) return { calendarDeletePending: booking.calendarDeletePending === true };
     let calendarDeletePending = true;
     if ((booking.googleCalendarEventId || bookingId) && typeof window.deleteBookingViaAppsScript === "function") {
         const result = await window.deleteBookingViaAppsScript({
@@ -2371,6 +2528,9 @@ async function cancelStudentBooking(bookingId) {
     if (!calendarDeletePending) {
         await window.db.collection("bookings").doc(bookingId).set({
             calendarDeletePending: false,
+            calendarSyncState: "synced",
+            calendarLastSyncedAt: Date.now(),
+            calendarSyncLastError: "",
             updatedAt: Date.now(),
         }, { merge: true });
     }
@@ -2426,16 +2586,28 @@ async function rescheduleStudentBooking(bookingId, newSlot) {
     const moveResult = await moveCalendarBooking(bookingId, booking, newSlot);
     const changedAt = Date.now();
     try {
-        const batch = window.db.batch();
-        batch.set(window.db.collection("bookings").doc(bookingId), {
+        const durationMinutes = Number(booking.durationMinutes || booking.slotMinutes || state.bookingSettings?.slotMinutes || 50);
+        const notificationVersion = Number(booking.notificationVersion || 0) + 1;
+        const oldClaimIds = getBookingSlotClaimIds(booking.slot, durationMinutes);
+        const newClaimRefs = getBookingSlotClaimIds(newSlot, durationMinutes).map((id) => window.db.collection("bookingSlotClaims").doc(id));
+        await window.db.runTransaction(async (transaction) => {
+        const newClaimSnaps = await Promise.all(newClaimRefs.map((ref) => transaction.get(ref)));
+        if (newClaimSnaps.some((claim) => claim.exists && claim.data()?.bookingId !== bookingId)) throw new Error("That time is no longer available.");
+        transaction.set(window.db.collection("bookings").doc(bookingId), {
             slot: newSlot,
+            consumeAfter: newSlot + durationMinutes * 60000,
             status: "rescheduled",
             updatedAt: changedAt,
             calendarSynced: true,
+            calendarSyncState: "synced",
+            calendarLastSyncedAt: changedAt,
             googleCalendarEventId: moveResult.eventId || booking.googleCalendarEventId || null,
             meetingUrl: moveResult.meetingUrl || booking.meetingUrl || "",
             rescheduledFrom: booking.slot,
             rescheduledAt: changedAt,
+            notificationVersion,
+            teacherNotificationStatus: "pending",
+            studentNotificationStatus: "pending",
             history: window.firebase.firestore.FieldValue.arrayUnion({
                 at: changedAt,
                 action: "rescheduled",
@@ -2444,7 +2616,7 @@ async function rescheduleStudentBooking(bookingId, newSlot) {
                 to: newSlot,
             }),
         }, { merge: true });
-        batch.set(window.db.collection("publicBookings").doc(bookingId), {
+        transaction.set(window.db.collection("publicBookings").doc(bookingId), {
             slot: newSlot,
             status: "rescheduled",
             updatedAt: changedAt,
@@ -2452,11 +2624,18 @@ async function rescheduleStudentBooking(bookingId, newSlot) {
             rescheduledFrom: booking.slot,
             rescheduledAt: changedAt,
         }, { merge: true });
-        await batch.commit();
+        oldClaimIds.filter((id) => !newClaimRefs.some((ref) => ref.id === id)).forEach((id) => transaction.delete(window.db.collection("bookingSlotClaims").doc(id)));
+        newClaimRefs.forEach((ref) => transaction.set(ref, { bookingId, studentUid: booking.studentUid || "", slot: newSlot, durationMinutes, status: "active", updatedAt: changedAt }));
+        [
+            createNotificationJob({ bookingId, notificationType: "reschedule", recipientType: "teacher", recipientEmail: state.contactSettings?.email || "", version: notificationVersion, createdAt: changedAt, createdBy: "student", deferInvalid: true }),
+            createNotificationJob({ bookingId, notificationType: "reschedule", recipientType: "student", recipientEmail: booking.email || state.currentUser?.email || "", version: notificationVersion, createdAt: changedAt, createdBy: "student" }),
+        ].forEach((job) => transaction.set(window.db.collection("notificationJobs").doc(job.id), job));
+        });
     } catch (error) {
         await rollbackCalendarMove(bookingId, booking, newSlot, moveResult);
         throw error;
     }
+    await refreshRuntimeBusyBlocks({ force: true });
 }
 
 async function deleteCalendarEventForBooking(bookingId, booking) {
@@ -2541,11 +2720,13 @@ async function rescheduleTeacherBooking(bookingId, booking, newSlot) {
             calendarSynced: true,
             googleCalendarEventId: moveResult.eventId || booking.googleCalendarEventId || null,
             meetingUrl: moveResult.meetingUrl || booking.meetingUrl || "",
+            teacherEmail: state.contactSettings?.email || "",
         });
     } catch (error) {
         await rollbackCalendarMove(bookingId, booking, newSlot, moveResult);
         throw error;
     }
+    await refreshTeacherCalendarAutomatically({ force: true });
     return moveResult;
 }
 
@@ -2807,6 +2988,37 @@ async function createCalendarEventForBooking(bookingId, booking, slot) {
     });
 }
 
+async function commitTeacherBookingWithClaims(bookingRef, bookingData, publicBookingData) {
+    const claimRefs = getBookingSlotClaimIds(bookingData.slot, bookingData.durationMinutes)
+        .map((id) => window.db.collection("bookingSlotClaims").doc(id));
+    await window.db.runTransaction(async (transaction) => {
+        const claims = await Promise.all(claimRefs.map((ref) => transaction.get(ref)));
+        if (claims.some((claim) => claim.exists && claim.data()?.bookingId !== bookingRef.id)) {
+            throw new Error("That time overlaps another platform lesson.");
+        }
+        transaction.set(bookingRef, bookingData);
+        transaction.set(window.db.collection("publicBookings").doc(bookingRef.id), publicBookingData);
+        if (bookingData.source === "teacher") {
+            const job = createNotificationJob({ bookingId: bookingRef.id, notificationType: "teacher-created", recipientType: "student", recipientEmail: bookingData.email || "", version: 0, createdAt: bookingData.createdAt, createdBy: "teacher" });
+            transaction.set(window.db.collection("notificationJobs").doc(job.id), job);
+            transaction.set(bookingRef, { notificationVersion: 0, studentNotificationStatus: job.state, studentNotificationAttempts: 0, studentNotificationLastError: job.lastError }, { merge: true });
+        }
+        claimRefs.forEach((ref) => transaction.set(ref, {
+            bookingId: bookingRef.id, studentUid: bookingData.studentUid || "",
+            slot: bookingData.slot, durationMinutes: bookingData.durationMinutes,
+            status: "active", updatedAt: Date.now(),
+        }));
+    });
+}
+
+async function releaseBookingSlotClaims(bookingId, booking) {
+    const ids = getBookingSlotClaimIds(booking.slot, booking.durationMinutes || booking.slotMinutes || 50);
+    if (!ids.length) return;
+    const batch = window.db.batch();
+    ids.forEach((id) => batch.delete(window.db.collection("bookingSlotClaims").doc(id)));
+    await batch.commit();
+}
+
 function getWeeklyRecurringSlot(slot, weekNumber, timezone) {
     const parts = getZonedParts(new Date(slot), timezone);
     const dateKey = `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
@@ -2841,6 +3053,9 @@ async function createWeeklyRecurringLessons(booking, additionalCount) {
             createdAt,
             updatedAt: createdAt,
             calendarSynced: false,
+            calendarSyncState: "pending-create",
+            calendarSyncAttempts: 0,
+            consumeAfter: slot + durationMinutes * 60000,
             googleCalendarEventId: "",
             meetingUrl: "",
             source: "teacher",
@@ -2854,7 +3069,7 @@ async function createWeeklyRecurringLessons(booking, additionalCount) {
             studentUid: booking.studentUid || "",
             timezone,
             isFreeTrial: false,
-            lessonPrice: Number(booking.lessonPrice) > 0 ? Number(booking.lessonPrice) : getConfiguredLessonPrice(),
+            pricingVersion: String(booking.pricingVersion || "legacy-unpriced"),
             history: [{
                 at: createdAt,
                 action: "created_recurring",
@@ -2870,10 +3085,7 @@ async function createWeeklyRecurringLessons(booking, additionalCount) {
             calendarSynced: false,
             source: "teacher",
         };
-        const batch = window.db.batch();
-        batch.set(bookingRef, recurringBooking);
-        batch.set(window.db.collection("publicBookings").doc(bookingRef.id), publicBooking);
-        await batch.commit();
+        await commitTeacherBookingWithClaims(bookingRef, recurringBooking, publicBooking);
 
         const calendarResult = await createCalendarEventForBooking(bookingRef.id, recurringBooking, slot);
         if (calendarResult?.success === false) {
@@ -2892,10 +3104,15 @@ async function createWeeklyRecurringLessons(booking, additionalCount) {
                 calendarSynced: false,
             }, { merge: true });
             await cancelBatch.commit();
+            await releaseBookingSlotClaims(bookingRef.id, recurringBooking);
             throw new Error(calendarResult.message || "Google Calendar rejected a recurring lesson.");
         }
         await bookingRef.set({
             calendarSynced: true,
+            calendarSyncState: "synced",
+            calendarLastSyncedAt: Date.now(),
+            calendarLastCheckedAt: Date.now(),
+            calendarSyncLastError: "",
             googleCalendarEventId: calendarResult.eventId || "",
             meetingUrl: calendarResult.meetingUrl || "",
             updatedAt: Date.now(),
@@ -2931,6 +3148,9 @@ async function createTeacherLessonForStudent(student, slot, durationMinutes) {
         createdAt,
         updatedAt: createdAt,
         calendarSynced: false,
+        calendarSyncState: "pending-create",
+        calendarSyncAttempts: 0,
+        consumeAfter: slot + durationMinutes * 60000,
         googleCalendarEventId: "",
         meetingUrl: "",
         source: "teacher",
@@ -2944,7 +3164,7 @@ async function createTeacherLessonForStudent(student, slot, durationMinutes) {
         studentUid,
         timezone,
         isFreeTrial: false,
-        lessonPrice: getConfiguredLessonPrice(),
+        pricingVersion: String(student.pricingVersion || "legacy-unpriced"),
         history: [{
             at: createdAt,
             action: "created_by_teacher",
@@ -2960,10 +3180,7 @@ async function createTeacherLessonForStudent(student, slot, durationMinutes) {
         calendarSynced: false,
         source: "teacher",
     };
-    const batch = window.db.batch();
-    batch.set(bookingRef, bookingData);
-    batch.set(window.db.collection("publicBookings").doc(bookingRef.id), publicBookingData);
-    await batch.commit();
+    await commitTeacherBookingWithClaims(bookingRef, bookingData, publicBookingData);
 
     const calendarResult = await createCalendarEventForBooking(bookingRef.id, bookingData, slot);
     if (calendarResult?.success === false) {
@@ -2980,12 +3197,17 @@ async function createTeacherLessonForStudent(student, slot, durationMinutes) {
             updatedAt: canceledAt,
         }, { merge: true });
         await cancelBatch.commit();
+        await releaseBookingSlotClaims(bookingRef.id, bookingData);
         throw new Error(calendarResult.message || "Google Calendar rejected the lesson.");
     }
     const syncedAt = Date.now();
     const syncBatch = window.db.batch();
     syncBatch.set(bookingRef, {
         calendarSynced: true,
+        calendarSyncState: "synced",
+        calendarLastSyncedAt: syncedAt,
+        calendarLastCheckedAt: syncedAt,
+        calendarSyncLastError: "",
         googleCalendarEventId: calendarResult.eventId || "",
         meetingUrl: calendarResult.meetingUrl || "",
         updatedAt: syncedAt,
@@ -3709,7 +3931,8 @@ function wireStudentActions() {
                 }
                 const cred = await window.auth.createUserWithEmailAndPassword(email, password);
                 await cred.user.updateProfile({ displayName: name });
-                await window.db.collection("users").doc(cred.user.uid).set({
+                const signupBatch = window.db.batch();
+                signupBatch.set(window.db.collection("users").doc(cred.user.uid), {
                     email,
                     name,
                     phone,
@@ -3717,6 +3940,11 @@ function wireStudentActions() {
                     createdAt: window.firebase.firestore.FieldValue.serverTimestamp(),
                     updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
                 });
+                signupBatch.set(window.db.collection("studentEntitlements").doc(cred.user.uid), {
+                    studentUid: cred.user.uid, lessonCredits: 0, reservedLessonCredits: 0,
+                    allowOverdraft: false, pricingVersion: "unconfigured", entitlementUpdatedAt: Date.now(),
+                });
+                await signupBatch.commit();
                 setStatus(els.studentAuthMsg, "Account created. You can book now.", "success");
                 els.studentAuthModal?.classList.remove("modal--open");
                 showScreen("student-screen");
@@ -4208,13 +4436,20 @@ function wireStudentActions() {
 
     els.bookingForm?.addEventListener("submit", async (event) => {
         event.preventDefault();
+        if (state.bookingSubmissionInFlight) {
+            setStatus(els.bookingMsg, "This booking is already being submitted.", "error");
+            return;
+        }
         if (!isStudentSignedIn()) {
             setStatus(els.bookingMsg, "Please sign in as a student before booking.", "error");
             els.studentAuthModal?.classList.add("modal--open");
             return;
         }
 
+        state.bookingSubmissionInFlight = true;
+        if (els.bookingSubmit) els.bookingSubmit.disabled = true;
         const profile = state.studentProfile || {};
+        try {
         const email = (state.currentUser.email || "").trim().toLowerCase();
         const hasPriorBooking = profile.trialUsed === true
             ? true
@@ -4234,17 +4469,22 @@ function wireStudentActions() {
             };
             updateStudentAccountUi();
         }
-        const balance = Number(profile.balance || 0);
-        const lessonPrice = getConfiguredLessonPrice();
-        if (!isTrial && lessonPrice <= 0) {
-            setStatus(els.bookingMsg, "The teacher must configure the lesson price before paid lessons can be booked.", "error");
-            return;
-        }
-        const allowOverdraft = profile.allowOverdraft === true;
+        const entitlement = state.studentEntitlement || profile;
+        const allowOverdraft = entitlement.allowOverdraft === true;
+        const baseOperationId = makeBookingOperationId(state.currentUser.uid, state.selectedSlotMs);
+        const baseOperationSnap = await window.db.collection("bookings").doc(baseOperationId).get();
+        const baseOperation = baseOperationSnap.exists ? (baseOperationSnap.data() || {}) : null;
+        const bookingOperationId = baseOperation && String(baseOperation.status || "").toLowerCase() === "canceled"
+            ? makeBookingOperationId(state.currentUser.uid, state.selectedSlotMs, `after_${Number(baseOperation.canceledAt || baseOperation.updatedAt || 0)}`)
+            : baseOperationId;
+        const existingOperationSnap = bookingOperationId === baseOperationId
+            ? baseOperationSnap
+            : await window.db.collection("bookings").doc(bookingOperationId).get();
+        const existingOperation = existingOperationSnap.exists ? (existingOperationSnap.data() || {}) : null;
         const reservedLessons = isTrial ? 0 : await countReservedPaidLessons(state.currentUser.uid);
-        const availableLessons = Math.max(0, getStudentTotalLessonCredits(profile, balance, lessonPrice) - reservedLessons);
+        const availableLessons = Math.max(0, Number(entitlement.lessonCredits || 0) - Number(entitlement.reservedLessonCredits || reservedLessons));
 
-        if (!isTrial && !allowOverdraft && availableLessons < 1) {
+        if (!existingOperation && !isTrial && !allowOverdraft && availableLessons < 1) {
             setStatus(els.bookingMsg, `You have no unreserved lesson credit left. ${reservedLessons} paid lesson${reservedLessons === 1 ? " is" : "s are"} already booked. Complete, cancel, or add credit before booking another lesson.`, "error");
             return;
         }
@@ -4276,7 +4516,7 @@ function wireStudentActions() {
                 recaptchaReady: true,
                 studentUid: state.currentUser.uid,
                 isFreeTrial: isTrial,
-                lessonPrice: isTrial ? 0 : lessonPrice,
+                pricingVersion: isTrial ? "free-trial" : String(entitlement.pricingVersion || "legacy-unpriced"),
             },
             bookingSubmit: els.bookingSubmit,
             bookingSubmitLabel: els.bookingSubmit?.querySelector(".btn__label"),
@@ -4296,11 +4536,18 @@ function wireStudentActions() {
             },
             buildBookingSelects: renderBookingCalendar,
             createBookingViaAppsScript: window.createBookingViaAppsScript,
+            getStudentBillingForBooking,
+            commitBookingWithBilling,
+            bookingOperationId,
             buildWhatsAppUrl,
             loadBookingStatus,
             isLocalDevHost,
         }));
         await loadStudentBookings();
+        } finally {
+            state.bookingSubmissionInFlight = false;
+            updateBookingSubmitState();
+        }
     });
 
     if (els.studentRatingSelect && !els.studentRatingSelect.querySelector("option[value='1']")) {
@@ -4957,7 +5204,7 @@ function switchTeacherTab(tabId) {
 
     state.activeTeacherTab = tabId;
     if (tabId === "tab-schedule") {
-        renderTeacherWeekCalendar();
+        refreshTeacherCalendarAutomatically({ force: true }).catch(console.error);
     }
 }
 
@@ -5175,7 +5422,7 @@ function updateTeacherOverviewStats() {
 
     // 2. Calculate Upcoming Bookings
     if (upcomingBookingsEl) {
-        const upcomingCount = bookingsList.filter(b => (b.status || "confirmed") !== "canceled" && (Number(b.slot || b.timeSlot || 0) >= now)).length;
+        const upcomingCount = bookingsList.filter(b => (b.status || "confirmed") !== "canceled" && !isLessonHistorical(b, now)).length;
         upcomingBookingsEl.textContent = upcomingCount;
     }
 
@@ -5540,7 +5787,7 @@ function renderTeacherWeekCalendar() {
             Math.abs(booking.startMs - startMs) < 2 * 60 * 1000
             || (startMs < booking.endMs && endMs > booking.startMs)
         ));
-        if (duplicatesBooking) return;
+        if (duplicatesBooking || (block.bookingId && bookings.some((booking) => String(booking.id || "") === String(block.bookingId)))) return;
         const dateKey = getDateKey(new Date(startMs), timezone);
         if (!eventsByDay.has(dateKey)) return;
         eventsByDay.get(dateKey).push({
@@ -5964,7 +6211,7 @@ function renderProfileUi() {
     }
 
     if (els.teacherProfileNameInput) els.teacherProfileNameInput.value = p.name || "";
-    if (els.teacherProfileRateInput) els.teacherProfileRateInput.value = p.rateText || "";
+    if (els.teacherProfileRateInput) els.teacherProfileRateInput.value = state.teacherRole === "teacher" && state.defaultLessonPrice ? String(state.defaultLessonPrice) : "";
     if (els.teacherProfileHeadlineInput) els.teacherProfileHeadlineInput.value = p.headline || "";
     if (els.teacherProfileAvatarUrlInput) els.teacherProfileAvatarUrlInput.value = p.avatarUrl || "";
     if (els.teacherProfileVideoUrlInput) els.teacherProfileVideoUrlInput.value = p.videoUrl || "";
@@ -6143,7 +6390,13 @@ function renderStudentLessonRecords(rows, className) {
         const duration = Number(booking.durationMinutes || booking.slotMinutes || state.bookingSettings?.slotMinutes || 50);
         const dateLabel = slot ? new Date(slot).toLocaleString([], { dateStyle: "medium", timeStyle: "short", timeZone: getTeacherTimezone() }) : "Date unavailable";
         const status = String(booking.status || "booked").toLowerCase();
-        const detail = booking.isFreeTrial ? "Free trial" : `${duration} minutes · ${status}`;
+        const emailState = String(booking.studentNotificationStatus || "pending").toLowerCase();
+        const accounting = booking.consumptionAccounting || null;
+        const difference = pricingDifference(accounting?.priceSnapshot);
+        const priceDetail = accounting
+            ? ` | Lesson deducted: 1 | Price: ${historicalPriceLabel(accounting.priceSnapshot)} | Pricing: ${accounting.priceSnapshot?.source || "legacy"}${difference?.kind === "discount" ? ` | Discount: $${difference.amount}` : difference?.kind === "adjustment" ? ` | Adjustment: $${difference.amount}` : ""} | Consumed: ${formatSlotTime(accounting.createdAt)}`
+            : (status === "completed" || isLessonHistorical(booking, Date.now())) ? " | Accounting: unavailable/legacy" : "";
+        const detail = `${booking.isFreeTrial ? "Free trial" : `${duration} minutes | ${status}`} | Booking ID: ${booking.id || "legacy"} | Student email: ${emailState}${priceDetail}`;
         return `<div class="student-lesson-record ${className}"><strong>${escapeHtml(dateLabel)}</strong><span>${escapeHtml(detail)}</span></div>`;
     }).join("");
 }
@@ -6171,25 +6424,30 @@ async function openStudentLessonsModal(student) {
     modal.classList.add("modal--open");
     modal.setAttribute("aria-hidden", "false");
     try {
-        const queries = [window.db.collection("bookings").where("studentUid", "==", student.id).limit(200).get()];
+        const queries = [
+            window.db.collection("bookings").where("studentUid", "==", student.id).limit(200).get(),
+            window.db.collection("lessonTransactions").where("studentUid", "==", student.id).limit(200).get(),
+        ];
         if (student.email) queries.push(window.db.collection("bookings").where("email", "==", student.email).limit(200).get());
         if (student.name) queries.push(window.db.collection("bookings").where("name", "==", student.name).limit(200).get());
         const snapshots = await Promise.all(queries);
+        const accountingByBooking = new Map();
+        snapshots[1].forEach((doc) => { const tx = doc.data() || {}; if (tx.bookingId) accountingByBooking.set(tx.bookingId, tx); });
         const rowMap = new Map();
         const normalizedEmail = String(student.email || "").trim().toLowerCase();
         const normalizedName = String(student.name || "").trim().toLowerCase();
-        snapshots.forEach((snapshot) => snapshot.forEach((doc) => {
+        snapshots.filter((_, index) => index !== 1).forEach((snapshot) => snapshot.forEach((doc) => {
             const row = doc.data() || {};
             const matchesUid = String(row.studentUid || "") === String(student.id);
             const matchesEmail = normalizedEmail && String(row.email || row.studentEmail || "").trim().toLowerCase() === normalizedEmail;
             const matchesLegacyName = !row.studentUid && normalizedName && String(row.name || row.studentName || "").trim().toLowerCase() === normalizedName;
-            if (matchesUid || matchesEmail || matchesLegacyName) rowMap.set(doc.id, { id: doc.id, ...row });
+            if (matchesUid || matchesEmail || matchesLegacyName) rowMap.set(doc.id, { id: doc.id, ...row, consumptionAccounting: accountingByBooking.get(doc.id) || null });
         }));
         const now = Date.now();
         const rows = Array.from(rowMap.values()).sort((a, b) => getBookingSlotMs(a.slot) - getBookingSlotMs(b.slot));
         const canceled = rows.filter((row) => String(row.status || "").toLowerCase() === "canceled").reverse();
-        const upcoming = rows.filter((row) => { const status = String(row.status || "booked").toLowerCase(); return status !== "canceled" && status !== "completed" && getBookingSlotMs(row.slot) >= now; });
-        const taken = rows.filter((row) => { const status = String(row.status || "booked").toLowerCase(); return status !== "canceled" && (status === "completed" || (getBookingSlotMs(row.slot) > 0 && getBookingSlotMs(row.slot) < now)); }).reverse();
+        const upcoming = rows.filter((row) => { const status = String(row.status || "booked").toLowerCase(); return status !== "canceled" && status !== "completed" && !isLessonHistorical(row, now); });
+        const taken = rows.filter((row) => { const status = String(row.status || "booked").toLowerCase(); return status !== "canceled" && (status === "completed" || isLessonHistorical(row, now)); }).reverse();
         content.innerHTML = `<div class="student-lessons-summary"><div><strong>${upcoming.length}</strong><span>Upcoming</span></div><div><strong>${taken.length}</strong><span>Taken</span></div><div><strong>${canceled.length}</strong><span>Canceled</span></div></div><div class="student-lessons-groups"><section class="student-lessons-group"><h4>Upcoming Lessons</h4>${renderStudentLessonRecords(upcoming, "")}</section><section class="student-lessons-group"><h4>Taken Lessons</h4>${renderStudentLessonRecords(taken, "student-lesson-record--taken")}</section><section class="student-lessons-group"><h4>Canceled Lessons</h4>${renderStudentLessonRecords(canceled, "student-lesson-record--canceled")}</section></div>`;
     } catch (error) { content.innerHTML = `<div class="status-line is-error">${escapeHtml(error.message || "Could not load lesson history.")}</div>`; }
 }
@@ -6201,13 +6459,125 @@ function confirmStudentCancellation(booking) {
     if (!modal || !message || !charge) return Promise.resolve(window.confirm("Cancel this lesson?"));
     const hoursRemaining = (Number(booking?.slot || 0) - Date.now()) / 3600000;
     const lateCharge = booking?.isFreeTrial !== true && hoursRemaining < 12;
-    const price = toMoneyValue(booking?.lessonPrice || getStudentLessonPrice());
     message.textContent = `Lesson scheduled for ${new Date(Number(booking?.slot || 0)).toLocaleString()}.`;
     charge.classList.toggle("is-free", !lateCharge);
-    charge.textContent = lateCharge ? `Late cancellation: one lesson${price > 0 ? ` (${formatMoney(price)})` : ""} will be deducted. Do you want to continue?` : "This cancellation is outside the 12-hour charge window. No lesson credit will be deducted.";
+    charge.textContent = lateCharge ? "Late cancellation: one lesson will be deducted. Do you want to continue?" : "This cancellation is outside the 12-hour charge window. No lesson credit will be deducted.";
     modal.classList.add("modal--open");
     modal.setAttribute("aria-hidden", "false");
     return new Promise((resolve) => { const finish = (answer) => { modal.classList.remove("modal--open"); modal.setAttribute("aria-hidden", "true"); resolve(answer); }; modal.querySelectorAll("[data-cancel-confirm]").forEach((button) => { button.onclick = () => finish(button.dataset.cancelConfirm === "yes"); }); });
+}
+
+async function migrateLegacyStudentFinancialData(userDocs, accounting, entitlements) {
+    const privateKeys = ["balance", "lessonPrice", "totalPaid", "transactions", "allowOverdraft", "financeUpdatedAt"];
+    const candidates = [];
+    userDocs.forEach((doc) => {
+        const data = doc.data() || {};
+        if (!entitlements.has(doc.id) || entitlements.get(doc.id)?.pricingVersion === "unconfigured" || privateKeys.some((key) => Object.prototype.hasOwnProperty.call(data, key))) candidates.push({ doc, data });
+    });
+    for (let offset = 0; offset < candidates.length; offset += 100) {
+        const batch = window.db.batch();
+        candidates.slice(offset, offset + 100).forEach(({ doc, data }) => {
+            const existingAccounting = accounting.get(doc.id) || {};
+            const existingEntitlement = entitlements.get(doc.id) || {};
+            const defaultPrice = validPrice(getConfiguredLessonPrice());
+            const customPrice = validPrice(data.lessonPrice);
+            const version = String(existingEntitlement.pricingVersion || `legacy_${doc.id}_${Date.now()}`);
+            const snapshot = resolvePriceSnapshot({ defaultPrice, customPrice, version });
+            batch.set(window.db.collection("studentAccounting").doc(doc.id), {
+                studentUid: doc.id,
+                balance: toMoneyValue(existingAccounting.balance ?? data.balance),
+                customLessonPrice: validPrice(existingAccounting.customLessonPrice ?? data.lessonPrice),
+                totalPaid: toMoneyValue(existingAccounting.totalPaid ?? data.totalPaid),
+                transactions: existingAccounting.transactions || data.transactions || [],
+                migratedAt: Date.now(),
+            }, { merge: true });
+            batch.set(window.db.collection("studentEntitlements").doc(doc.id), {
+                studentUid: doc.id,
+                lessonCredits: Math.max(0, Number(existingEntitlement.lessonCredits ?? data.lessonCredits ?? getLegacyLessonCredits(data, customPrice || defaultPrice || 0))),
+                reservedLessonCredits: Math.max(0, Number(existingEntitlement.reservedLessonCredits ?? data.reservedLessonCredits ?? 0)),
+                allowOverdraft: existingEntitlement.allowOverdraft === true || data.allowOverdraft === true,
+                pricingVersion: snapshot?.version || "legacy-unpriced",
+                entitlementUpdatedAt: Date.now(),
+            }, { merge: true });
+            if (snapshot) batch.set(window.db.collection("pricingSnapshots").doc(snapshot.version), { studentUid: doc.id, ...snapshot });
+            const deletions = {};
+            privateKeys.forEach((key) => { if (Object.prototype.hasOwnProperty.call(data, key)) deletions[key] = window.firebase.firestore.FieldValue.delete(); });
+            batch.update(doc.ref, deletions);
+        });
+        await batch.commit();
+    }
+    return candidates.length;
+}
+
+async function migrateLegacyFinancialPrivacy() {
+    const markerRef = window.db.collection("teacherAccounting").doc("privacyMigrationV1");
+    const marker = await markerRef.get();
+    if (marker.exists && marker.data()?.completed === true) return;
+    const [users, accountingSnap, entitlementSnap, bookings] = await Promise.all([
+        window.db.collection("users").where("role", "==", "student").get(),
+        window.db.collection("studentAccounting").get(),
+        window.db.collection("studentEntitlements").get(),
+        window.db.collection("bookings").get(),
+    ]);
+    const accounting = new Map();
+    const entitlements = new Map();
+    accountingSnap.forEach((doc) => accounting.set(doc.id, doc.data() || {}));
+    entitlementSnap.forEach((doc) => entitlements.set(doc.id, doc.data() || {}));
+    await migrateLegacyStudentFinancialData(users, accounting, entitlements);
+    const legacyBookings = [];
+    bookings.forEach((doc) => {
+        const data = doc.data() || {};
+        if (Object.prototype.hasOwnProperty.call(data, "lessonPrice") || Object.prototype.hasOwnProperty.call(data, "chargedAmount")) legacyBookings.push({ doc, data });
+    });
+    for (let offset = 0; offset < legacyBookings.length; offset += 150) {
+        const batch = window.db.batch();
+        legacyBookings.slice(offset, offset + 150).forEach(({ doc, data }) => {
+            const effectivePrice = validPrice(data.lessonPrice || data.chargedAmount);
+            const version = effectivePrice ? `legacy_booking_${doc.id}` : "legacy-unpriced";
+            if (effectivePrice) {
+                batch.set(window.db.collection("pricingSnapshots").doc(version), {
+                    version, studentUid: data.studentUid || "", effectivePrice, currency: "USD",
+                    source: "legacy-snapshot", defaultPrice: null, customPrice: null,
+                    capturedAt: Number(data.createdAt || data.slot || Date.now()),
+                });
+            }
+            batch.update(doc.ref, {
+                pricingVersion: version,
+                lessonPrice: window.firebase.firestore.FieldValue.delete(),
+                chargedAmount: window.firebase.firestore.FieldValue.delete(),
+                history: Array.isArray(data.history) ? data.history.map(({ amount, ...entry }) => entry) : [],
+            });
+        });
+        await batch.commit();
+    }
+    await markerRef.set({ completed: true, completedAt: Date.now(), studentsMigrated: users.size, bookingsMigrated: legacyBookings.length });
+}
+
+async function rotateFuturePricingVersions(defaultPrice) {
+    const [accountingSnap, entitlementSnap] = await Promise.all([
+        window.db.collection("studentAccounting").get(),
+        window.db.collection("studentEntitlements").get(),
+    ]);
+    const accounting = new Map();
+    accountingSnap.forEach((doc) => accounting.set(doc.id, doc.data() || {}));
+    const entitlements = [];
+    entitlementSnap.forEach((doc) => entitlements.push(doc));
+    const changedAt = Date.now();
+    for (let offset = 0; offset < entitlements.length; offset += 200) {
+        const batch = window.db.batch();
+        entitlements.slice(offset, offset + 200).forEach((doc) => {
+            const snapshot = resolvePriceSnapshot({
+                defaultPrice,
+                customPrice: accounting.get(doc.id)?.customLessonPrice,
+                version: `price_${doc.id}_${changedAt}`,
+                capturedAt: changedAt,
+            });
+            if (!snapshot) return;
+            batch.set(window.db.collection("pricingSnapshots").doc(snapshot.version), { studentUid: doc.id, ...snapshot });
+            batch.set(doc.ref, { pricingVersion: snapshot.version, entitlementUpdatedAt: changedAt }, { merge: true });
+        });
+        await batch.commit();
+    }
 }
 
 async function refreshTeacherStudents() {
@@ -6215,9 +6585,19 @@ async function refreshTeacherStudents() {
     els.teacherStudentsList.innerHTML = "<div class=\"small-note\">Loading students...</div>";
     state.studentCache.clear();
     try {
-        const snap = await window.db.collection("users").where("role", "==", "student").get();
+        const [snap, accountingSnap, entitlementSnap] = await Promise.all([
+            window.db.collection("users").where("role", "==", "student").get(),
+            window.db.collection("studentAccounting").get(),
+            window.db.collection("studentEntitlements").get(),
+        ]);
+        const accounting = new Map();
+        const entitlements = new Map();
+        accountingSnap.forEach((doc) => accounting.set(doc.id, doc.data() || {}));
+        entitlementSnap.forEach((doc) => entitlements.set(doc.id, doc.data() || {}));
+        const migratedCount = await migrateLegacyStudentFinancialData(snap, accounting, entitlements);
+        if (migratedCount > 0) return refreshTeacherStudents();
         const students = [];
-        snap.forEach((doc) => students.push({ id: doc.id, ...(doc.data() || {}) }));
+        snap.forEach((doc) => students.push({ id: doc.id, ...(doc.data() || {}), ...(entitlements.get(doc.id) || {}), ...(accounting.get(doc.id) || {}) }));
         students.sort((a, b) => String(a.name || a.email || "").localeCompare(String(b.name || b.email || "")));
         state.studentsCache = students;
         updateTeacherOverviewStats();
@@ -6228,7 +6608,7 @@ async function refreshTeacherStudents() {
         els.teacherStudentsList.innerHTML = students.map((student) => {
             state.studentCache.set(student.id, student);
             const balance = formatMoney(student.balance);
-            const lessonPrice = toMoneyValue(student.lessonPrice);
+            const lessonPrice = validPrice(student.customLessonPrice) || "";
             const courseAccess = student.courseAccess === true;
             const accessLabel = courseAccess ? "Course: unlocked" : "Course: locked";
             const accessRequested = (student.courseAccessRequested === true || student.paymentStatus === "pending")
@@ -6303,8 +6683,9 @@ async function refreshTeacherStudents() {
                                 <input data-student-balance type="number" step="0.01" value="${escapeHtml(toMoneyValue(student.balance))}" />
                             </label>
                             <label class="field student-finance-card student-finance-card--detail">
-                                <span>Lesson Price ($)</span>
+                                <span>Custom Lesson Price ($, optional)</span>
                                 <input data-student-price type="number" min="0" step="0.01" value="${escapeHtml(lessonPrice)}" />
+                                <small>Default: ${formatMoney(state.defaultLessonPrice)} · Effective: ${formatMoney(validPrice(lessonPrice) || state.defaultLessonPrice)} (${validPrice(lessonPrice) ? "Custom" : "Default"})</small>
                             </label>
                             <label class="field student-finance-card student-finance-card--detail">
                                 <span>Phone</span>
@@ -6361,18 +6742,27 @@ async function refreshTeacherStudents() {
 
 async function saveStudentFinance(studentId, balance, lessonPrice, accessData = {}) {
     const userRef = window.db.collection("users").doc(studentId);
-    const userSnap = await userRef.get();
+    const accountingRef = window.db.collection("studentAccounting").doc(studentId);
+    const entitlementRef = window.db.collection("studentEntitlements").doc(studentId);
+    const [userSnap, accountingSnap, entitlementSnap] = await Promise.all([userRef.get(), accountingRef.get(), entitlementRef.get()]);
     const userData = userSnap.exists ? (userSnap.data() || {}) : {};
+    const accountingData = accountingSnap.exists ? (accountingSnap.data() || {}) : userData;
+    const entitlementData = entitlementSnap.exists ? (entitlementSnap.data() || {}) : userData;
     
-    const oldBalance = Number(userData.balance || 0);
+    const oldBalance = Number(accountingData.balance || 0);
     const newBalance = toMoneyValue(balance);
     const diff = newBalance - oldBalance;
     const now = Date.now();
     const countsAsPayment = accessData.adjustmentType === "payment";
     
-    const updateData = {
+    const accountingUpdate = {
+        studentUid: studentId,
         balance: newBalance,
-        lessonPrice: toMoneyValue(lessonPrice),
+        customLessonPrice: validPrice(lessonPrice),
+        totalPaid: Number.isFinite(accessData.totalPaid) ? Math.max(0, toMoneyValue(accessData.totalPaid)) : Math.max(0, toMoneyValue(accountingData.totalPaid)),
+        financeUpdatedAt: now,
+    };
+    const publicUpdate = {
         courseAccess: accessData.courseAccess === true,
         accessType: accessData.courseAccess ? (accessData.accessType || "lifetime") : "none",
         accessProduct: accessData.courseAccess ? "palestinian-arabic-starter" : "",
@@ -6380,20 +6770,23 @@ async function saveStudentFinance(studentId, balance, lessonPrice, accessData = 
         paymentNote: (accessData.paymentNote || "").trim().slice(0, 300),
         courseAccessRequested: accessData.courseAccess ? false : accessData.courseAccessRequested === true,
         courseAccessUpdatedAt: now,
-        financeUpdatedAt: now,
         updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
     };
-
-    if (typeof accessData.allowOverdraft !== "undefined") {
-        updateData.allowOverdraft = accessData.allowOverdraft === true;
-    }
+    const defaultPrice = validPrice(getConfiguredLessonPrice());
+    const snapshot = resolvePriceSnapshot({ defaultPrice, customPrice: lessonPrice, version: `price_${studentId}_${now}`, capturedAt: now });
+    const entitlementUpdate = {
+        studentUid: studentId,
+        lessonCredits: Number.isFinite(accessData.lessonCredits) ? Math.max(0, Math.floor(accessData.lessonCredits)) : Math.max(0, Number(entitlementData.lessonCredits || 0)),
+        reservedLessonCredits: Math.max(0, Number(entitlementData.reservedLessonCredits || 0)),
+        allowOverdraft: accessData.allowOverdraft === true,
+        pricingVersion: snapshot?.version || String(entitlementData.pricingVersion || "legacy-unpriced"),
+        entitlementUpdatedAt: now,
+    };
 
     if (typeof accessData.reviewRequested !== "undefined") {
-        updateData.reviewRequested = accessData.reviewRequested === true;
-        updateData.reviewRequestedAt = accessData.reviewRequested ? now : null;
+        publicUpdate.reviewRequested = accessData.reviewRequested === true;
+        publicUpdate.reviewRequestedAt = accessData.reviewRequested ? now : null;
     }
-    if (Number.isFinite(accessData.lessonCredits)) updateData.lessonCredits = Math.max(0, Math.floor(accessData.lessonCredits));
-    if (Number.isFinite(accessData.totalPaid)) updateData.totalPaid = Math.max(0, toMoneyValue(accessData.totalPaid));
 
     if (diff !== 0) {
         const txDesc = diff > 0 
@@ -6408,13 +6801,16 @@ async function saveStudentFinance(studentId, balance, lessonPrice, accessData = 
             description: txDesc,
             newBalance: newBalance
         };
-        updateData.transactions = window.firebase.firestore.FieldValue.arrayUnion(tx);
+        accountingUpdate.transactions = window.firebase.firestore.FieldValue.arrayUnion(tx);
     }
     
     const teacherRef = window.db.collection("teachers").doc(state.teacherUser.uid);
     await window.db.runTransaction(async (transaction) => {
         const teacherSnap = await transaction.get(teacherRef);
-        transaction.set(userRef, updateData, { merge: true });
+        transaction.set(userRef, publicUpdate, { merge: true });
+        transaction.set(accountingRef, accountingUpdate, { merge: true });
+        transaction.set(entitlementRef, entitlementUpdate, { merge: true });
+        if (snapshot) transaction.set(window.db.collection("pricingSnapshots").doc(snapshot.version), { studentUid: studentId, ...snapshot });
         if (diff !== 0 && countsAsPayment) {
             const teacherData = teacherSnap.exists ? (teacherSnap.data() || {}) : {};
             const currentRevenue = Number.isFinite(Number(teacherData.revenueTotal))
@@ -6492,6 +6888,65 @@ async function loadBalanceChargeCandidates(now) {
     return Array.from(docsById.values());
 }
 
+async function consumeBookingTransactionally(doc, now, missingPrice) {
+    const initial = doc.data() || {};
+    const bookingRef = window.db.collection("bookings").doc(doc.id);
+    const accountingRef = window.db.collection("studentAccounting").doc(initial.studentUid);
+    const entitlementRef = window.db.collection("studentEntitlements").doc(initial.studentUid);
+    const pricingRef = initial.pricingVersion && initial.pricingVersion !== "legacy-unpriced"
+        ? window.db.collection("pricingSnapshots").doc(initial.pricingVersion)
+        : null;
+    const ledgerRef = window.db.collection("lessonTransactions").doc(`booking_${doc.id}_consume`);
+    let consumed = false;
+    await window.db.runTransaction(async (transaction) => {
+        const bookingSnap = await transaction.get(bookingRef);
+        const accountingSnap = await transaction.get(accountingRef);
+        const entitlementSnap = await transaction.get(entitlementRef);
+        const pricingSnap = pricingRef ? await transaction.get(pricingRef) : null;
+        const ledgerSnap = await transaction.get(ledgerRef);
+        if (!bookingSnap.exists || !accountingSnap.exists || !entitlementSnap.exists || ledgerSnap.exists) return;
+        const booking = bookingSnap.data() || {};
+        if (booking.balanceChargedAt || booking.balanceCharged) return;
+        const status = String(booking.status || "booked").toLowerCase();
+        const canceledAt = Number(booking.canceledAt || 0);
+        const systemConflict = Array.isArray(booking.history) && booking.history.some((item) => item?.action === "calendar-conflict");
+        const lateCanceled = status === "canceled" && !systemConflict &&
+            String(booking.canceledBy || "student").toLowerCase() === "student" && canceledAt &&
+            Number(booking.slot || 0) - canceledAt < STUDENT_CHANGE_CUTOFF_MS;
+        if (!isConsumptionEligible(booking, now) && !lateCanceled) return;
+        const accounting = accountingSnap.data() || {};
+        const entitlement = entitlementSnap.data() || {};
+        const priceSnapshot = pricingSnap?.exists ? (pricingSnap.data() || {}) : null;
+        const lessonPrice = booking.isFreeTrial === true ? 0 : validPrice(priceSnapshot?.effectivePrice);
+        if (!(lessonPrice > 0)) { missingPrice.add(booking.studentUid); return; }
+        const newBalance = toMoneyValue(accounting.balance) - lessonPrice;
+        const reason = lateCanceled ? "late-cancel" : "lesson";
+        const wasReserved = booking.reservationStatus === "reserved" || booking.reservationStatus === "pending-late-consumption" ||
+            (!booking.reservationStatus && Number(entitlement.reservedLessonCredits || 0) > 0);
+        const txEntry = { id: `tx_${doc.id}_charge`, at: now, amount: -lessonPrice, type: reason,
+            description: lateCanceled ? "Late cancellation lesson charge" : "Lesson deduction", newBalance };
+        const accountingUpdate = {
+            balance: newBalance,
+            transactions: window.firebase.firestore.FieldValue.arrayUnion(txEntry),
+            financeUpdatedAt: now,
+        };
+        transaction.set(accountingRef, accountingUpdate, { merge: true });
+        transaction.set(entitlementRef, {
+            lessonCredits: Math.max(0, Number(entitlement.lessonCredits || 0) - 1),
+            reservedLessonCredits: Math.max(0, Number(entitlement.reservedLessonCredits || 0) - (wasReserved ? 1 : 0)),
+            entitlementUpdatedAt: now,
+        }, { merge: true });
+        transaction.set(bookingRef, {
+            balanceChargedAt: now, chargeReason: reason,
+            reservationStatus: "consumed", consumedAt: now, consumptionTransactionId: ledgerRef.id, updatedAt: now,
+            history: window.firebase.firestore.FieldValue.arrayUnion({ at: now, action: "lesson-consumed", by: "teacher", reason }),
+        }, { merge: true });
+        transaction.set(ledgerRef, { studentUid: booking.studentUid, bookingId: doc.id, type: "consume", lessonDelta: -1, moneyDelta: -lessonPrice, priceSnapshot: priceSnapshot || null, createdAt: now, effectiveAt: getLessonConsumeAfter(booking) });
+        consumed = true;
+    });
+    return consumed;
+}
+
 async function reconcileStudentBalances() {
     const now = Date.now();
     const docs = await loadBalanceChargeCandidates(now);
@@ -6502,13 +6957,18 @@ async function reconcileStudentBalances() {
         const booking = doc.data() || {};
         const status = String(booking.status || "booked").toLowerCase();
         if (!booking.studentUid || booking.balanceChargedAt || booking.balanceCharged) continue;
-        const shouldChargeAttended = Number(booking.slot || 0) <= now && (status === "booked" || status === "rescheduled");
+        const shouldChargeAttended = isConsumptionEligible(booking, now);
         const canceledAt = Number(booking.canceledAt || 0);
+        const systemConflict = Array.isArray(booking.history) && booking.history.some((item) => item?.action === "calendar-conflict");
         const lateCanceled = status === "canceled" &&
+            !systemConflict &&
             String(booking.canceledBy || "student").toLowerCase() === "student" &&
             canceledAt &&
             Number(booking.slot || 0) - canceledAt < STUDENT_CHANGE_CUTOFF_MS;
         if (!shouldChargeAttended && !lateCanceled) continue;
+
+        if (await consumeBookingTransactionally(doc, now, missingPrice)) chargedCount += 1;
+        continue;
 
         let studentSnap = studentDocs.get(booking.studentUid);
         if (!studentSnap) {
@@ -6687,7 +7147,7 @@ function wireTeacherActions() {
                     ...state.profileSettings,
                     name: (els.teacherProfileNameInput?.value || "").trim() || "Farouq Murtaja",
                     headline: (els.teacherProfileHeadlineInput?.value || "").trim(),
-                    rateText: (els.teacherProfileRateInput?.value || "").trim(),
+                    rateText: "",
                     avatarUrl: (els.teacherProfileAvatarUrlInput?.value || "").trim(),
                     videoUrl: (els.teacherProfileVideoUrlInput?.value || "").trim(),
                     hoursTaught: (els.teacherProfileHoursInput?.value || "").trim() || "1,200+",
@@ -6696,8 +7156,17 @@ function wireTeacherActions() {
                     bioText: (els.teacherProfileBioInput?.value || "").trim(),
                 };
                 state.profileSettings = updated;
+                const defaultPriceText = String(els.teacherProfileRateInput?.value || "").replace(/,/g, "").match(/\d+(?:\.\d+)?/);
+                const defaultPrice = validPrice(defaultPriceText?.[0]);
+                if (!defaultPrice) throw new Error("Enter a valid global default lesson price.");
+                state.defaultLessonPrice = defaultPrice;
                 saveLocalProfileSettings("teacher_profile_v1", updated);
-                await saveCloudProfileSettings(window.db, updated);
+                await Promise.all([
+                    saveCloudProfileSettings(window.db, updated),
+                    window.db.collection("teacherAccounting").doc("global").set({ defaultLessonPrice: defaultPrice, currency: "USD", updatedAt: Date.now() }, { merge: true }),
+                    window.db.collection("teacherProfile").doc("primary").update({ rateText: window.firebase.firestore.FieldValue.delete() }),
+                ]);
+                await rotateFuturePricingVersions(defaultPrice);
                 renderProfileUi();
                 updateStudentOfferUi();
                 setStatus(els.teacherProfileMsg, "Profile settings saved successfully!", "success");
@@ -7617,6 +8086,9 @@ function wireTeacherActions() {
                 if (!calendarDeletePending) {
                     await window.db.collection("bookings").doc(bookingId).set({
                         calendarDeletePending: false,
+                        calendarSyncState: "synced",
+                        calendarLastSyncedAt: Date.now(),
+                        calendarSyncLastError: "",
                         updatedAt: Date.now(),
                     }, { merge: true });
                 }
@@ -7763,8 +8235,19 @@ function showScreen(screenId) {
         button.classList.toggle("is-active", button.getAttribute("data-target") === screenId);
     });
     if (screenId === "student-screen") {
+        stopTeacherCalendarAutoRefresh();
+        stopTeacherBookingsListener();
         withAppLoading("Loading available times...", () => ensureBookingCalendarLoaded()).catch(console.error);
         startGoogleBusyAutoRefresh();
+    } else if (screenId === "teacher-screen") {
+        stopGoogleBusyAutoRefresh();
+        startTeacherCalendarAutoRefresh();
+        startTeacherBookingsListener();
+        refreshTeacherCalendarAutomatically({ force: true }).catch(console.error);
+    } else {
+        stopGoogleBusyAutoRefresh();
+        stopTeacherCalendarAutoRefresh();
+        stopTeacherBookingsListener();
     }
 }
 
@@ -7774,9 +8257,13 @@ async function handleAuthState(user) {
     stopBalanceReconcileAutoRefresh();
     stopTeacherLessonFeedbackListener();
     stopPreplyStatisticsAutoSync();
+    stopGoogleBusyAutoRefresh();
+    stopTeacherCalendarAutoRefresh();
+    stopTeacherBookingsListener();
     state.currentUser = user || null;
     state.currentRole = "";
     state.studentProfile = null;
+    state.studentEntitlement = null;
     state.teacherUser = null;
     state.teacherRole = "";
     state.publicSettingsLoaded = false;
@@ -7873,12 +8360,21 @@ async function handleAuthState(user) {
 
     const teacherDoc = await window.db.collection("teachers").doc(user.uid).get();
     const teacherData = teacherDoc.exists ? (teacherDoc.data() || {}) : {};
+    const teacherAccountingDoc = await window.db.collection("teacherAccounting").doc("global").get();
+    const legacyDefaultPrice = String(state.profileSettings?.rateText || "").replace(/,/g, "").match(/\d+(?:\.\d+)?/);
+    state.defaultLessonPrice = validPrice(teacherAccountingDoc.data()?.defaultLessonPrice) || validPrice(legacyDefaultPrice?.[0]) || 15;
+    if (!teacherAccountingDoc.exists) {
+        await window.db.collection("teacherAccounting").doc("global").set({ defaultLessonPrice: state.defaultLessonPrice, currency: "USD", migratedAt: Date.now() });
+    }
+    await migrateLegacyFinancialPrivacy();
     renderPreplyStatisticsSummary(teacherData.calendarStatistics || {});
     if (els.teacherAppsScriptUrl) els.teacherAppsScriptUrl.value = teacherData.appsScript?.webAppUrl || "";
     if (els.teacherPreplyCalendarId) {
         els.teacherPreplyCalendarId.value = teacherData.preplyCalendarId || teacherData.googleCalendar?.preplyCalendarId || "";
     }
     await refreshTeacherDashboard();
+    startTeacherCalendarAutoRefresh();
+    startTeacherBookingsListener();
     startTeacherLessonFeedbackListener();
     if (teacherData.calendarStatistics?.initialized === true) {
         syncPreplyStatistics().catch((error) => {

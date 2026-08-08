@@ -58,13 +58,24 @@ In your site:
 2. Paste the Web App URL into `Apps Script Web App URL`
 3. Click `Save Apps Script URL`
 4. Click `Test Apps Script`
-5. Click `Import Busy via Apps Script`
-6. Create the reminder trigger manually in Apps Script to send student reminder emails about 15 minutes before each lesson
-7. Create the balance deduction trigger manually in Apps Script so balances are deducted even when the teacher dashboard is closed
+5. Click `Refresh Calendar Now` to verify Calendar and Preply access.
+
+## 5. Enable automatic Calendar synchronization (required once)
+
+The deploying Google account must have access to the Firebase project and the configured calendars.
+
+1. Deploy the latest `booking-sync.gs` and `appsscript.json` and approve the requested Calendar and Datastore permissions.
+2. In Apps Script, select the function `installCalendarSyncTrigger` and click **Run** once.
+3. Approve permissions when prompted.
+4. Open **Triggers** and verify `processCalendarSynchronization` is scheduled every five minutes.
+5. Run `processCalendarSynchronization` once manually and confirm its execution succeeds.
+
+This worker retries pending Calendar creates/deletes and reconciles direct Google changes without requiring a browser tab.
+It also processes deterministic pending email notification jobs independently from Calendar state. No additional email trigger is required.
 
 After changing `apps-script/booking-sync.gs`, create a new Apps Script deployment version, then keep the same Web App URL in the dashboard unless Google gives you a new one.
 
-## 5. Lesson Reminders
+## 6. Lesson Reminders
 
 The script supports two reminder paths:
 
@@ -87,7 +98,7 @@ If Google shows a permission error for `ScriptApp.getProjectTriggers`, ignore th
 
 The script stores sent reminder markers in Apps Script properties so the same booking does not receive duplicate reminder emails.
 
-## 6. Automatic Balance Deductions
+## 7. Automatic Balance Deductions
 
 The script can deduct student balances in the background without the teacher dashboard being open.
 
@@ -108,7 +119,7 @@ Balance deductions run from the authenticated teacher dashboard. No Firebase tea
 
 To test manually, open the teacher dashboard and click `Check Balance Deductions`.
 
-## 7. Optional
+## 8. Optional
 
 If you also want Preply busy times:
 1. Save your Preply calendar ID in Apps Script properties
@@ -126,3 +137,12 @@ If you also have busy events on another Google Calendar:
 - It does not use the browser Google token for booking sync.
 - If Apps Script cannot access the Preply calendar, the Google account that owns the script likely does not have permission to that calendar.
 - Reminder email sending uses your Apps Script / Gmail daily quota.
+
+## Phase 4 financial privacy deployment order
+
+1. Deploy the web application code while the current Firestore rules remain active.
+2. Sign in once as the teacher and wait for the dashboard to finish loading. The resumable `privacyMigrationV1` copies legacy money and price values into teacher-only documents before removing those fields from student-readable profiles and bookings.
+3. Confirm `teacherAccounting/privacyMigrationV1.completed == true` in Firestore.
+4. Deploy the updated `firestore.rules`.
+
+Do not deploy the stricter rules before the migration marker exists. Legacy bookings containing financial fields are intentionally not student-readable under the new rules.

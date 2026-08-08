@@ -5,7 +5,7 @@ export function createInitialProfileSettings() {
         headline: "Professional Palestinian Arabic & Levantine Dialect Specialist",
         avatarUrl: "",
         videoUrl: "",
-        rateText: "$15 / 50 min",
+        rateText: "",
         hoursTaught: "1,200+",
         studentsCount: "85+",
         quoteArabic: "Specializing in teaching Palestinian dialect to complete beginners. I guide you step by step with patience and clarity until you feel confident using Arabic in real life.",

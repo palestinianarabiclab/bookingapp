@@ -1,3 +1,6 @@
+import { getBookingSlotClaimIds, getLessonConsumeAfter } from "./bookingBalance.js";
+import { createNotificationJob } from "./notificationJobs.js";
+
 export async function renderTeacherBookings({
     db,
     teacherBookingList,
@@ -9,7 +12,7 @@ export async function renderTeacherBookings({
     teacherBookingList.innerHTML = "<div class=\"small-note\">Loading bookings...</div>";
     bookingCache.clear();
     try {
-        const managementStart = Date.now() - 3600000;
+        const now = Date.now();
         const calendarHistoryStart = Date.now() - 60 * 24 * 60 * 60 * 1000;
         let snap;
         try {
@@ -42,7 +45,7 @@ export async function renderTeacherBookings({
         items.forEach((booking) => {
             bookingCache.set(booking.id, booking);
         });
-        const managementItems = items.filter((booking) => Number(booking.slot || 0) >= managementStart);
+        const managementItems = items.filter((booking) => getLessonConsumeAfter(booking) > now);
         if (!managementItems.length) {
             teacherBookingList.innerHTML = "<div class=\"small-note\">No upcoming bookings.</div>";
             return bookingCache;
@@ -70,6 +73,11 @@ export async function renderTeacherBookings({
                 const rescheduledFrom = b.rescheduledFrom
                     ? `<div class="booking-item__meta">From: ${escapeHtml(formatSlotTime(b.rescheduledFrom))}</div>`
                     : "";
+                const notificationLabel = (recipient, value) => {
+                    const normalized = String(value || "pending").toLowerCase();
+                    return `${recipient} email: ${normalized === "sent" ? "Sent" : normalized === "skipped" ? "Skipped" : normalized === "failed" ? "Failed" : "Pending"}`;
+                };
+                const notificationStatus = `<div class="booking-item__meta" data-notification-status>${escapeHtml(notificationLabel("Student", b.studentNotificationStatus))} · ${escapeHtml(notificationLabel("Teacher", b.teacherNotificationStatus))}</div>`;
                 const cutoffMs = 12 * 60 * 60 * 1000;
                 const isLateCancel = (status !== "canceled" && status !== "completed") && (Number(b.slot || 0) - Date.now() < cutoffMs);
                 const deadlineMs = Number(b.slot || 0) - cutoffMs;
@@ -87,6 +95,7 @@ export async function renderTeacherBookings({
                             <div class="booking-item__time">${escapeHtml(formatSlotTime(b.slot))}</div>
                             ${rescheduledFrom}
                             <div class="${statusClass}">${escapeHtml(statusLabel)}</div>
+                            ${notificationStatus}
                             ${lateLabel}
                         </div>
                         <div class="booking-item__actions" style="display: flex; flex-wrap: wrap; gap: 6px;">
@@ -140,13 +149,20 @@ export async function openReschedulePanel({
 }
 
 export async function cancelBooking({ db, firebase, bookingId }) {
-    const bookingSnap = await db.collection("bookings").doc(bookingId).get();
-    if (!bookingSnap.exists) throw new Error("Booking was not found.");
-    const booking = bookingSnap.data() || {};
+    const bookingRef = db.collection("bookings").doc(bookingId);
+    let booking = {};
     const canceledAt = Date.now();
-    const batch = db.batch();
-    batch.set(
-        db.collection("bookings").doc(bookingId),
+    await db.runTransaction(async (transaction) => {
+        const bookingSnap = await transaction.get(bookingRef);
+        if (!bookingSnap.exists) throw new Error("Booking was not found.");
+        booking = bookingSnap.data() || {};
+        if (String(booking.status || "").toLowerCase() === "canceled") return;
+        const userRef = booking.studentUid ? db.collection("users").doc(booking.studentUid) : null;
+        const entitlementRef = booking.studentUid ? db.collection("studentEntitlements").doc(booking.studentUid) : null;
+        const entitlementSnap = entitlementRef ? await transaction.get(entitlementRef) : null;
+        const notificationVersion = Number(booking.notificationVersion || 0) + 1;
+        transaction.set(
+        bookingRef,
         {
             status: "canceled",
             calendarSynced: false,
@@ -154,6 +170,12 @@ export async function cancelBooking({ db, firebase, bookingId }) {
             updatedAt: canceledAt,
             canceledAt,
             canceledBy: "teacher",
+            calendarSyncState: "pending-delete",
+            calendarNextRetryAt: canceledAt,
+            reservationStatus: "released",
+            reservationReleasedAt: canceledAt,
+            notificationVersion,
+            studentNotificationStatus: "pending",
             history: firebase.firestore.FieldValue.arrayUnion({
                 at: canceledAt,
                 action: "canceled",
@@ -162,7 +184,11 @@ export async function cancelBooking({ db, firebase, bookingId }) {
         },
         { merge: true }
     );
-    batch.set(
+    getBookingSlotClaimIds(booking.slot, booking.durationMinutes || booking.slotMinutes || 50)
+        .forEach((id) => transaction.delete(db.collection("bookingSlotClaims").doc(id)));
+    const cancelJob = createNotificationJob({ bookingId, notificationType: "teacher-cancellation", recipientType: "student", recipientEmail: booking.email || "", version: notificationVersion, createdAt: canceledAt, createdBy: "teacher" });
+    transaction.set(db.collection("notificationJobs").doc(cancelJob.id), cancelJob);
+        transaction.set(
         db.collection("publicBookings").doc(bookingId),
         {
             status: "canceled",
@@ -172,14 +198,21 @@ export async function cancelBooking({ db, firebase, bookingId }) {
         { merge: true }
     );
     if (booking.isFreeTrial === true && booking.studentUid) {
-        batch.set(db.collection("users").doc(booking.studentUid), {
+        transaction.set(db.collection("users").doc(booking.studentUid), {
             trialUsed: false,
             trialUsedAt: firebase.firestore.FieldValue.delete(),
             updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
         }, { merge: true });
-        batch.delete(db.collection("trialClaims").doc(booking.studentUid));
+        transaction.delete(db.collection("trialClaims").doc(booking.studentUid));
+    } else if (entitlementRef && entitlementSnap?.exists && !booking.balanceChargedAt && !booking.balanceCharged &&
+        !["released", "consumed", "not-required"].includes(String(booking.reservationStatus || ""))) {
+        const current = Math.max(0, Number(entitlementSnap.data()?.reservedLessonCredits || 0));
+        transaction.set(entitlementRef, {
+            reservedLessonCredits: Math.max(0, current - 1),
+            entitlementUpdatedAt: canceledAt,
+        }, { merge: true });
     }
-    await batch.commit();
+    });
 }
 
 export async function rescheduleBooking({
@@ -191,22 +224,36 @@ export async function rescheduleBooking({
     calendarSynced = false,
     googleCalendarEventId = null,
     meetingUrl = "",
+    teacherEmail = "",
 }) {
-    const batch = db.batch();
-    batch.set(
+    const changedAt = Date.now();
+    const durationMinutes = Number(booking.durationMinutes || booking.slotMinutes || 50);
+    const notificationVersion = Number(booking.notificationVersion || 0) + 1;
+    const oldClaimIds = getBookingSlotClaimIds(booking.slot, durationMinutes);
+    const newClaimRefs = getBookingSlotClaimIds(newSlot, durationMinutes).map((id) => db.collection("bookingSlotClaims").doc(id));
+    await db.runTransaction(async (transaction) => {
+    const newClaims = await Promise.all(newClaimRefs.map((ref) => transaction.get(ref)));
+    if (newClaims.some((claim) => claim.exists && claim.data()?.bookingId !== bookingId)) throw new Error("That time overlaps another platform lesson.");
+    transaction.set(
         db.collection("bookings").doc(bookingId),
         {
             slot: newSlot,
+            consumeAfter: newSlot + Number(booking.durationMinutes || booking.slotMinutes || 50) * 60000,
             status: "rescheduled",
             rescheduledFrom: booking.slot,
-            rescheduledAt: Date.now(),
+            rescheduledAt: changedAt,
             calendarSynced,
+            calendarSyncState: calendarSynced ? "synced" : "pending-update",
+            calendarLastSyncedAt: calendarSynced ? changedAt : null,
             googleCalendarEventId,
             meetingUrl,
+            notificationVersion,
+            teacherNotificationStatus: "pending",
+            studentNotificationStatus: "pending",
             studentNotice: "Your teacher changed the lesson time. Please review the updated schedule.",
             studentNoticeAt: Date.now(),
             history: firebase.firestore.FieldValue.arrayUnion({
-                at: Date.now(),
+                at: changedAt,
                 action: "rescheduled",
                 by: "teacher",
                 from: booking.slot,
@@ -215,17 +262,23 @@ export async function rescheduleBooking({
         },
         { merge: true }
     );
-    batch.set(
+    transaction.set(
         db.collection("publicBookings").doc(bookingId),
         {
             slot: newSlot,
             status: "rescheduled",
-            updatedAt: Date.now(),
+            updatedAt: changedAt,
             calendarSynced,
         },
         { merge: true }
     );
-    await batch.commit();
+    oldClaimIds.filter((id) => !newClaimRefs.some((ref) => ref.id === id)).forEach((id) => transaction.delete(db.collection("bookingSlotClaims").doc(id)));
+    newClaimRefs.forEach((ref) => transaction.set(ref, { bookingId, studentUid: booking.studentUid || "", slot: newSlot, durationMinutes, status: "active", updatedAt: changedAt }));
+    [
+        createNotificationJob({ bookingId, notificationType: "reschedule", recipientType: "teacher", recipientEmail: teacherEmail, version: notificationVersion, createdAt: changedAt, createdBy: "teacher", deferInvalid: true }),
+        createNotificationJob({ bookingId, notificationType: "reschedule", recipientType: "student", recipientEmail: booking.email || "", version: notificationVersion, createdAt: changedAt, createdBy: "teacher" }),
+    ].forEach((job) => transaction.set(db.collection("notificationJobs").doc(job.id), job));
+    });
 }
 
 export async function resizeBookingDuration({
@@ -236,11 +289,17 @@ export async function resizeBookingDuration({
     durationMinutes,
 }) {
     const updatedAt = Date.now();
-    const batch = db.batch();
-    batch.set(
+    const previousDuration = Number(booking.durationMinutes || booking.slotMinutes || 50);
+    const oldClaimIds = getBookingSlotClaimIds(booking.slot, previousDuration);
+    const newClaimRefs = getBookingSlotClaimIds(booking.slot, durationMinutes).map((id) => db.collection("bookingSlotClaims").doc(id));
+    await db.runTransaction(async (transaction) => {
+    const claims = await Promise.all(newClaimRefs.map((ref) => transaction.get(ref)));
+    if (claims.some((claim) => claim.exists && claim.data()?.bookingId !== bookingId)) throw new Error("The longer duration overlaps another platform lesson.");
+    transaction.set(
         db.collection("bookings").doc(bookingId),
         {
             durationMinutes,
+            consumeAfter: Number(booking.slot || 0) + durationMinutes * 60000,
             updatedAt,
             studentNotice: `Your teacher changed the lesson duration to ${durationMinutes} minutes.`,
             studentNoticeAt: updatedAt,
@@ -248,13 +307,13 @@ export async function resizeBookingDuration({
                 at: updatedAt,
                 action: "duration_changed",
                 by: "teacher",
-                from: Number(booking.durationMinutes || booking.slotMinutes || 50),
+                from: previousDuration,
                 to: durationMinutes,
             }),
         },
         { merge: true }
     );
-    batch.set(
+    transaction.set(
         db.collection("publicBookings").doc(bookingId),
         {
             durationMinutes,
@@ -262,10 +321,21 @@ export async function resizeBookingDuration({
         },
         { merge: true }
     );
-    await batch.commit();
+    oldClaimIds.filter((id) => !newClaimRefs.some((ref) => ref.id === id)).forEach((id) => transaction.delete(db.collection("bookingSlotClaims").doc(id)));
+    newClaimRefs.forEach((ref) => transaction.set(ref, { bookingId, studentUid: booking.studentUid || "", slot: Number(booking.slot || 0), durationMinutes, status: "active", updatedAt }));
+    });
 }
 
 export async function clearAllBookings({ db }) {
+    let claimsSnap;
+    do {
+        claimsSnap = await db.collection("bookingSlotClaims").limit(300).get();
+        if (!claimsSnap.empty) {
+            const batch = db.batch();
+            claimsSnap.docs.forEach((doc) => batch.delete(doc.ref));
+            await batch.commit();
+        }
+    } while (!claimsSnap.empty);
     let bookingSnap;
     do {
         bookingSnap = await db.collection("bookings").limit(300).get();

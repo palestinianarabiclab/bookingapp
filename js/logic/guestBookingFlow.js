@@ -28,6 +28,7 @@ export async function submitGuestBooking({
     commitBookingWithBilling,
     loadBookingStatus,
     isLocalDevHost,
+    bookingOperationId,
 }) {
     const {
         name,
@@ -45,7 +46,7 @@ export async function submitGuestBooking({
         recaptchaReady,
         studentUid,
         isFreeTrial,
-        lessonPrice,
+        pricingVersion,
     } = formValues;
     const normalizedPhone = String(phone || "").trim().startsWith("+")
         ? `+${String(phone || "").replace(/\D/g, "")}`
@@ -133,7 +134,9 @@ export async function submitGuestBooking({
             studentLocale ? `Student locale: ${studentLocale}` : "",
         ].filter(Boolean).join("\n");
 
-        const bookingRef = db.collection("bookings").doc();
+        const bookingRef = bookingOperationId
+            ? db.collection("bookings").doc(bookingOperationId)
+            : db.collection("bookings").doc();
         let calendarSynced = false;
         let googleCalendarEventId = null;
         let meetingUrl = "";
@@ -164,13 +167,18 @@ export async function submitGuestBooking({
             durationMinutes: bookingSettings.slotMinutes || 50,
             status: "booked",
             calendarSynced,
+            calendarSyncState: "pending-create",
+            calendarSyncAttempts: 0,
+            calendarSyncLastError: "",
+            calendarLastCheckedAt: null,
+            calendarLastSyncedAt: null,
             googleCalendarEventId,
             meetingUrl,
             timezone: bookingSettings.timezone || getLocalTimezone(),
             createdAt: Date.now(),
             updatedAt: Date.now(),
             isFreeTrial: isFreeTrial === true,
-            lessonPrice: isFreeTrial === true ? 0 : (Number(lessonPrice) || 15),
+            pricingVersion: isFreeTrial === true ? "free-trial" : String(pricingVersion || ""),
             history: [
                 {
                     at: Date.now(),
@@ -178,6 +186,15 @@ export async function submitGuestBooking({
                     by: "student",
                 },
             ],
+            bookingOperationId: bookingRef.id,
+            reservationStatus: isFreeTrial === true ? "not-required" : "reserved",
+            reservedAt: Date.now(),
+            consumeAfter: selectedSlot + (bookingSettings.slotMinutes || 50) * 60000,
+            notificationVersion: 0,
+            teacherNotificationStatus: "pending",
+            teacherNotificationAttempts: 0,
+            studentNotificationStatus: "pending",
+            studentNotificationAttempts: 0,
         };
 
         const publicBookingData = {
@@ -239,6 +256,11 @@ export async function submitGuestBooking({
             const syncBatch = db.batch();
             syncBatch.set(bookingRef, {
                 calendarSynced: true,
+                calendarSyncState: "synced",
+                calendarSyncAttempts: 1,
+                calendarSyncLastError: "",
+                calendarLastCheckedAt: Date.now(),
+                calendarLastSyncedAt: Date.now(),
                 googleCalendarEventId,
                 meetingUrl,
                 updatedAt: Date.now(),
@@ -273,6 +295,13 @@ export async function submitGuestBooking({
             }
         } else {
             appsScriptMessage = appsScriptSync?.message || "";
+            await bookingRef.set({
+                calendarSyncState: "failed",
+                calendarSyncAttempts: 1,
+                calendarSyncLastError: appsScriptMessage || "Calendar creation failed.",
+                calendarLastCheckedAt: Date.now(),
+                calendarNextRetryAt: Date.now() + 5 * 60 * 1000,
+            }, { merge: true }).catch(console.error);
             const slotWasTaken = /no longer available|already (taken|booked)|conflict/i.test(appsScriptMessage);
             if (slotWasTaken) {
                 const canceledAt = Date.now();
