@@ -6654,13 +6654,23 @@ async function refreshTeacherStudents() {
             return `
                 <div class="student-admin-item" data-student-id="${escapeHtml(student.id)}">
                     <button class="student-admin-item__summary" type="button" data-student-action="toggle">
-                        <span>
-                            <strong>${escapeHtml(student.name || "Student")}</strong>
-                            <span>${escapeHtml(student.email || "")}</span>
+                        <span class="student-admin-item__identity">
+                            <span class="student-admin-item__avatar">${escapeHtml(String(student.name || student.email || "S").slice(0, 1).toUpperCase())}</span>
+                            <span><strong>${escapeHtml(student.name || "Student")}</strong><span>${escapeHtml(student.email || "")}</span></span>
                         </span>
-                        <span class="student-admin-item__money">Money: ${balance} | Lessons: ${lessonCredits} total, ${reservedLessons} reserved, ${availableLessons} available | ${accessLabel}${requestLabel}</span>
+                        <span class="student-admin-metrics">
+                            <span class="student-admin-metric"><small>Available</small><strong>${availableLessons}</strong></span>
+                            <span class="student-admin-metric"><small>Reserved</small><strong>${reservedLessons}</strong></span>
+                            <span class="student-admin-metric"><small>Balance</small><strong>${balance}</strong></span>
+                            <span class="student-admin-metric student-admin-metric--status"><small>Access</small><strong>${accessLabel.replace("Course: ", "")}${requestLabel}</strong></span>
+                        </span>
+                        <span class="student-admin-item__chevron" aria-hidden="true">⌄</span>
                     </button>
                     <form class="student-admin-editor" data-student-editor hidden>
+                        <div class="student-admin-editor__head">
+                            <div><strong>Student account</strong><span>${escapeHtml(student.phone || "No phone number")}</span></div>
+                            <button class="btn btn--outline btn--small" type="button" data-student-action="view-lessons" data-student-id="${escapeHtml(student.id)}">View Lessons & deductions</button>
+                        </div>
                         ${accessRequested ? `
                             <div style="background: #fef3c7; border: 1px solid #f59e0b; color: #92400e; padding: 10px 12px; border-radius: 8px; font-weight: 600; margin-bottom: 12px; font-size: 0.9rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
                                 <span>⚡ Payment Request: <strong>${escapeHtml(requestedPkg)}</strong> ${requestedAmt ? `($${requestedAmt})` : ""}</span>
@@ -6668,7 +6678,7 @@ async function refreshTeacherStudents() {
                             </div>
                         ` : ""}
 
-                        <div style="margin-bottom: 10px;">
+                        <div class="student-admin-redundant-note" style="margin-bottom: 10px;">
                             <span style="font-size: 0.8rem; font-weight: 700; color: var(--ink-light); display: block; margin-bottom: 4px;">⚡ Quick Add Credit (1-Click):</span>
                             <div class="quick-credit-btn-group">
                                 <span class="small-note">Use the balance and lesson-price fields below for manual adjustments.</span>
@@ -6716,10 +6726,6 @@ async function refreshTeacherStudents() {
                                 <input data-student-price type="number" min="0" step="0.01" value="${escapeHtml(lessonPrice)}" />
                                 <small>Default: ${formatMoney(state.defaultLessonPrice)} · Effective: ${formatMoney(validPrice(lessonPrice) || state.defaultLessonPrice)} (${validPrice(lessonPrice) ? "Custom" : "Default"})</small>
                             </label>
-                            <label class="field student-finance-card student-finance-card--detail">
-                                <span>Phone</span>
-                                <input value="${escapeHtml(student.phone || "")}" disabled />
-                            </label>
                         </div>
                         <div style="display: flex; gap: 24px; margin-bottom: 12px; flex-wrap: wrap;">
                             <label class="field checkbox-field" style="margin: 0; flex: 1; min-width: 200px;">
@@ -6755,7 +6761,6 @@ async function refreshTeacherStudents() {
                             </label>
                         </div>
                         <div class="action-row">
-                            <button class="btn btn--outline btn--small" type="button" data-student-action="view-lessons" data-student-id="${escapeHtml(student.id)}">View Lessons</button>
                             <button class="btn btn--primary btn--small" type="submit" data-student-action="save">Save Student</button>
                             <button class="btn btn--ghost btn--small" type="button" data-student-action="delete">Delete Student</button>
                         </div>
