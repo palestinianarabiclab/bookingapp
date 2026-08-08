@@ -140,9 +140,8 @@ If you also have busy events on another Google Calendar:
 
 ## Phase 4 financial privacy deployment order
 
-1. Deploy the web application code while the current Firestore rules remain active.
-2. Sign in once as the teacher and wait for the dashboard to finish loading. The resumable `privacyMigrationV1` copies legacy money and price values into teacher-only documents before removing those fields from student-readable profiles and bookings.
+1. Deploy the updated `firestore.rules` first so the authenticated teacher can create the new teacher-only accounting, entitlement, and pricing documents.
+2. Deploy the web application code and immediately sign in once as the teacher. Wait for the dashboard to finish loading; the resumable `privacyMigrationV1` copies legacy money and price values before removing those fields from student-readable profiles and bookings.
 3. Confirm `teacherAccounting/privacyMigrationV1.completed == true` in Firestore.
-4. Deploy the updated `firestore.rules`.
 
-Do not deploy the stricter rules before the migration marker exists. Legacy bookings containing financial fields are intentionally not student-readable under the new rules.
+Between steps 1 and 3, legacy bookings that still contain financial fields are intentionally unavailable to students. Complete the teacher migration immediately after deploying the Rules.

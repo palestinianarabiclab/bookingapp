@@ -10,4 +10,4 @@
 - External Google/Preply entries: busy blocks only; they are never platform bookings.
 - Notification delivery: `notificationJobs`.
 
-The one-time `privacyMigrationV1` runs at the first teacher sign-in after deployment. It copies legacy financial values before removing them from student-readable profiles/bookings and records completion in `teacherAccounting/privacyMigrationV1`.
+After the updated Rules are deployed, the one-time `privacyMigrationV1` runs at the first teacher sign-in. It copies legacy financial values before removing them from student-readable profiles/bookings and records completion in `teacherAccounting/privacyMigrationV1`.

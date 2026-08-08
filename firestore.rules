@@ -602,6 +602,8 @@ service cloud.firestore {
             'rescheduledAt',
             'balanceChargedAt',
             'chargedAmount',
+            'lessonPrice',
+            'pricingVersion',
             'chargeReason',
             'classroomNotes',
             'boardDataUrl',
