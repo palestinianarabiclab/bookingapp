@@ -6391,10 +6391,12 @@ function renderStudentLessonRecords(rows, className) {
         const dateLabel = slot ? new Date(slot).toLocaleString([], { dateStyle: "medium", timeStyle: "short", timeZone: getTeacherTimezone() }) : "Date unavailable";
         const status = String(booking.status || "booked").toLowerCase();
         const emailState = String(booking.studentNotificationStatus || "pending").toLowerCase();
-        const accounting = booking.consumptionAccounting || null;
+        const accountingEntries = Array.isArray(booking.consumptionAccounting) ? booking.consumptionAccounting : [];
+        const accounting = accountingEntries[0] || null;
         const difference = pricingDifference(accounting?.priceSnapshot);
+        const duplicateWarning = accountingEntries.length > 1 ? ` | WARNING: ${accountingEntries.length} consumption ledger records for this booking` : "";
         const priceDetail = accounting
-            ? ` | Lesson deducted: 1 | Price: ${historicalPriceLabel(accounting.priceSnapshot)} | Pricing: ${accounting.priceSnapshot?.source || "legacy"}${difference?.kind === "discount" ? ` | Discount: $${difference.amount}` : difference?.kind === "adjustment" ? ` | Adjustment: $${difference.amount}` : ""} | Consumed: ${formatSlotTime(accounting.createdAt)}`
+            ? ` | Lesson deducted: ${accountingEntries.length} | Ledger: ${accountingEntries.map((entry) => entry.id || "legacy").join(", ")} | Reason: ${accounting.type || booking.chargeReason || "lesson"} | Price: ${historicalPriceLabel(accounting.priceSnapshot)} | Pricing: ${accounting.priceSnapshot?.source || "legacy"}${difference?.kind === "discount" ? ` | Discount: $${difference.amount}` : difference?.kind === "adjustment" ? ` | Adjustment: $${difference.amount}` : ""} | Consumed: ${formatSlotTime(accounting.createdAt)}${duplicateWarning}`
             : (status === "completed" || isLessonHistorical(booking, Date.now())) ? " | Accounting: unavailable/legacy" : "";
         const detail = `${booking.isFreeTrial ? "Free trial" : `${duration} minutes | ${status}`} | Booking ID: ${booking.id || "legacy"} | Student email: ${emailState}${priceDetail}`;
         return `<div class="student-lesson-record ${className}"><strong>${escapeHtml(dateLabel)}</strong><span>${escapeHtml(detail)}</span></div>`;
@@ -6427,28 +6429,47 @@ async function openStudentLessonsModal(student) {
         const queries = [
             window.db.collection("bookings").where("studentUid", "==", student.id).limit(200).get(),
             window.db.collection("lessonTransactions").where("studentUid", "==", student.id).limit(200).get(),
+            window.db.collection("studentAccounting").doc(student.id).get(),
+            window.db.collection("studentEntitlements").doc(student.id).get(),
         ];
         if (student.email) queries.push(window.db.collection("bookings").where("email", "==", student.email).limit(200).get());
         if (student.name) queries.push(window.db.collection("bookings").where("name", "==", student.name).limit(200).get());
         const snapshots = await Promise.all(queries);
         const accountingByBooking = new Map();
-        snapshots[1].forEach((doc) => { const tx = doc.data() || {}; if (tx.bookingId) accountingByBooking.set(tx.bookingId, tx); });
+        snapshots[1].forEach((doc) => {
+            const tx = { id: doc.id, ...(doc.data() || {}) };
+            if (!tx.bookingId) return;
+            const entries = accountingByBooking.get(tx.bookingId) || [];
+            entries.push(tx);
+            accountingByBooking.set(tx.bookingId, entries);
+        });
+        const studentAccounting = snapshots[2].exists ? (snapshots[2].data() || {}) : {};
+        const entitlement = snapshots[3].exists ? (snapshots[3].data() || {}) : {};
         const rowMap = new Map();
         const normalizedEmail = String(student.email || "").trim().toLowerCase();
         const normalizedName = String(student.name || "").trim().toLowerCase();
-        snapshots.filter((_, index) => index !== 1).forEach((snapshot) => snapshot.forEach((doc) => {
+        snapshots.filter((_, index) => index !== 1 && index !== 2 && index !== 3).forEach((snapshot) => snapshot.forEach((doc) => {
             const row = doc.data() || {};
             const matchesUid = String(row.studentUid || "") === String(student.id);
             const matchesEmail = normalizedEmail && String(row.email || row.studentEmail || "").trim().toLowerCase() === normalizedEmail;
             const matchesLegacyName = !row.studentUid && normalizedName && String(row.name || row.studentName || "").trim().toLowerCase() === normalizedName;
-            if (matchesUid || matchesEmail || matchesLegacyName) rowMap.set(doc.id, { id: doc.id, ...row, consumptionAccounting: accountingByBooking.get(doc.id) || null });
+            if (matchesUid || matchesEmail || matchesLegacyName) rowMap.set(doc.id, { id: doc.id, ...row, consumptionAccounting: accountingByBooking.get(doc.id) || [] });
         }));
         const now = Date.now();
         const rows = Array.from(rowMap.values()).sort((a, b) => getBookingSlotMs(a.slot) - getBookingSlotMs(b.slot));
         const canceled = rows.filter((row) => String(row.status || "").toLowerCase() === "canceled").reverse();
         const upcoming = rows.filter((row) => { const status = String(row.status || "booked").toLowerCase(); return status !== "canceled" && status !== "completed" && !isLessonHistorical(row, now); });
         const taken = rows.filter((row) => { const status = String(row.status || "booked").toLowerCase(); return status !== "canceled" && (status === "completed" || isLessonHistorical(row, now)); }).reverse();
-        content.innerHTML = `<div class="student-lessons-summary"><div><strong>${upcoming.length}</strong><span>Upcoming</span></div><div><strong>${taken.length}</strong><span>Taken</span></div><div><strong>${canceled.length}</strong><span>Canceled</span></div></div><div class="student-lessons-groups"><section class="student-lessons-group"><h4>Upcoming Lessons</h4>${renderStudentLessonRecords(upcoming, "")}</section><section class="student-lessons-group"><h4>Taken Lessons</h4>${renderStudentLessonRecords(taken, "student-lesson-record--taken")}</section><section class="student-lessons-group"><h4>Canceled Lessons</h4>${renderStudentLessonRecords(canceled, "student-lesson-record--canceled")}</section></div>`;
+        const financialEntries = Array.isArray(studentAccounting.transactions) ? studentAccounting.transactions.filter((tx) => Number(tx?.amount) < 0) : [];
+        const transactionIdCounts = new Map();
+        financialEntries.forEach((tx) => transactionIdCounts.set(String(tx.id || "missing-id"), (transactionIdCounts.get(String(tx.id || "missing-id")) || 0) + 1));
+        const duplicateTransactions = Array.from(transactionIdCounts.entries()).filter(([, count]) => count > 1);
+        const availableLessons = Math.max(0, Number(entitlement.lessonCredits || 0) - Number(entitlement.reservedLessonCredits || 0));
+        const auditClass = duplicateTransactions.length ? "status-line is-error" : "small-note";
+        const auditText = duplicateTransactions.length
+            ? `Duplicate deduction records detected: ${duplicateTransactions.map(([id, count]) => `${id} × ${count}`).join(", ")}`
+            : `No duplicate deterministic deduction IDs found. Ledger deductions: ${snapshots[1].size}; financial charge entries: ${financialEntries.length}.`;
+        content.innerHTML = `<div class="student-lessons-summary"><div><strong>${upcoming.length}</strong><span>Upcoming</span></div><div><strong>${taken.length}</strong><span>Taken</span></div><div><strong>${canceled.length}</strong><span>Canceled</span></div><div><strong>${Number(entitlement.lessonCredits || 0)}</strong><span>Owned lessons</span></div><div><strong>${Number(entitlement.reservedLessonCredits || 0)}</strong><span>Reserved</span></div><div><strong>${availableLessons}</strong><span>Available</span></div></div><p class="${auditClass}">${escapeHtml(auditText)}</p><p class="small-note">Teacher-only money balance: ${escapeHtml(formatMoney(studentAccounting.balance))}. Each lesson below shows its Booking ID, ledger ID, deduction reason, price snapshot, and consumption time.</p><div class="student-lessons-groups"><section class="student-lessons-group"><h4>Upcoming Lessons</h4>${renderStudentLessonRecords(upcoming, "")}</section><section class="student-lessons-group"><h4>Taken Lessons</h4>${renderStudentLessonRecords(taken, "student-lesson-record--taken")}</section><section class="student-lessons-group"><h4>Canceled Lessons</h4>${renderStudentLessonRecords(canceled, "student-lesson-record--canceled")}</section></div>`;
     } catch (error) { content.innerHTML = `<div class="status-line is-error">${escapeHtml(error.message || "Could not load lesson history.")}</div>`; }
 }
 
@@ -6608,6 +6629,9 @@ async function refreshTeacherStudents() {
         els.teacherStudentsList.innerHTML = students.map((student) => {
             state.studentCache.set(student.id, student);
             const balance = formatMoney(student.balance);
+            const lessonCredits = Math.max(0, Number(student.lessonCredits || 0));
+            const reservedLessons = Math.max(0, Number(student.reservedLessonCredits || 0));
+            const availableLessons = Math.max(0, lessonCredits - reservedLessons);
             const lessonPrice = validPrice(student.customLessonPrice) || "";
             const courseAccess = student.courseAccess === true;
             const accessLabel = courseAccess ? "Course: unlocked" : "Course: locked";
@@ -6634,7 +6658,7 @@ async function refreshTeacherStudents() {
                             <strong>${escapeHtml(student.name || "Student")}</strong>
                             <span>${escapeHtml(student.email || "")}</span>
                         </span>
-                        <span class="student-admin-item__money">Balance: ${balance} | ${accessLabel}${requestLabel}</span>
+                        <span class="student-admin-item__money">Money: ${balance} | Lessons: ${lessonCredits} total, ${reservedLessons} reserved, ${availableLessons} available | ${accessLabel}${requestLabel}</span>
                     </button>
                     <form class="student-admin-editor" data-student-editor hidden>
                         ${accessRequested ? `
