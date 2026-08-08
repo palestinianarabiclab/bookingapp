@@ -6707,6 +6707,11 @@ async function refreshTeacherStudents() {
                                 <input data-student-balance type="number" step="0.01" value="${escapeHtml(toMoneyValue(student.balance))}" />
                             </label>
                             <label class="field student-finance-card student-finance-card--detail">
+                                <span>Remaining Lessons — set exact number</span>
+                                <input data-student-lesson-credits type="number" min="0" step="1" value="${escapeHtml(lessonCredits)}" />
+                                <small>${reservedLessons} reserved · ${availableLessons} currently available</small>
+                            </label>
+                            <label class="field student-finance-card student-finance-card--detail">
                                 <span>Custom Lesson Price ($, optional)</span>
                                 <input data-student-price type="number" min="0" step="0.01" value="${escapeHtml(lessonPrice)}" />
                                 <small>Default: ${formatMoney(state.defaultLessonPrice)} · Effective: ${formatMoney(validPrice(lessonPrice) || state.defaultLessonPrice)} (${validPrice(lessonPrice) ? "Custom" : "Default"})</small>
@@ -7865,6 +7870,13 @@ function wireTeacherActions() {
             const amount = toMoneyValue(form?.querySelector(isPayment ? "[data-student-add-payment]" : "[data-student-add-refund]")?.value);
             const student = state.studentCache.get(studentId) || {};
             if (!studentId || amount <= 0) { setStatus(els.teacherStudentsMsg, "Enter an amount greater than zero.", "error"); return; }
+            const effectivePrice = validPrice(form?.querySelector("[data-student-price]")?.value) || validPrice(state.defaultLessonPrice);
+            const restoredLessonsRaw = !isPayment && effectivePrice ? amount / effectivePrice : 0;
+            const restoredLessons = Math.round(restoredLessonsRaw);
+            if (!isPayment && (!effectivePrice || restoredLessons < 1 || Math.abs(restoredLessonsRaw - restoredLessons) > 0.0001)) {
+                setStatus(els.teacherStudentsMsg, `The returned amount must equal a whole number of lessons at ${formatMoney(effectivePrice || 0)} each. You can also set Remaining Lessons directly.`, "error");
+                return;
+            }
             withButtonLoading(balanceActionBtn, isPayment ? "Adding..." : "Returning...", async () => {
                 await saveStudentFinance(studentId, toMoneyValue(student.balance) + amount, form?.querySelector("[data-student-price]")?.value, {
                     courseAccess: student.courseAccess === true,
@@ -7874,10 +7886,11 @@ function wireTeacherActions() {
                     courseAccessRequested: student.courseAccessRequested === true,
                     allowOverdraft: student.allowOverdraft === true,
                     reviewRequested: student.reviewRequested === true,
+                    lessonCredits: !isPayment ? Math.max(0, Number(student.lessonCredits || 0)) + restoredLessons : Number(student.lessonCredits || 0),
                     adjustmentType: isPayment ? "payment" : "refund",
                 });
                 await refreshTeacherStudents();
-                setStatus(els.teacherStudentsMsg, `${isPayment ? "Payment added" : "Credit returned"}. New balance: ${formatMoney(toMoneyValue(student.balance) + amount)}.`, "success");
+                setStatus(els.teacherStudentsMsg, `${isPayment ? "Payment added" : `Credit returned and ${restoredLessons} lesson${restoredLessons === 1 ? "" : "s"} restored`}. New balance: ${formatMoney(toMoneyValue(student.balance) + amount)}.`, "success");
             }).catch((error) => setStatus(els.teacherStudentsMsg, error.message || "Could not update balance.", "error"));
             return;
         }
@@ -8037,6 +8050,7 @@ function wireTeacherActions() {
                         courseAccessRequested: !courseAccessChecked && existingStudent.courseAccessRequested === true,
                         allowOverdraft: allowOverdraftChecked,
                         reviewRequested: existingStudent.reviewRequested === true,
+                        lessonCredits: Math.max(0, Math.floor(Number(form.querySelector("[data-student-lesson-credits]")?.value || 0))),
                     }
                 );
                 await refreshTeacherStudents();
