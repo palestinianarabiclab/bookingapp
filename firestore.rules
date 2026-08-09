@@ -498,6 +498,10 @@ service cloud.firestore {
           'reservationStatus',
           'reservedAt',
           'consumeAfter'
+          ,'consumptionDueAt'
+          ,'consumptionState'
+          ,'consumptionLastError'
+          ,'consumptionAttempts'
           ,'calendarSyncState'
           ,'calendarSyncAttempts'
           ,'calendarSyncLastError'
@@ -544,6 +548,11 @@ service cloud.firestore {
         request.resource.data.durationMinutes <= 240 &&
         request.resource.data.slot < request.time.toMillis() + 366 * 24 * 60 * 60 * 1000 &&
         request.resource.data.isFreeTrial is bool &&
+        request.resource.data.consumptionLastError == "" &&
+        (
+          (request.resource.data.isFreeTrial == true && request.resource.data.consumptionDueAt == null && request.resource.data.consumptionState == "not-required") ||
+          (request.resource.data.isFreeTrial == false && request.resource.data.consumptionDueAt == request.resource.data.slot + request.resource.data.durationMinutes * 60 * 1000 && request.resource.data.consumptionState == "pending")
+        ) &&
         request.resource.data.pricingVersion is string &&
         request.resource.data.pricingVersion.size() > 0 &&
         request.resource.data.pricingVersion.size() <= 200 &&
@@ -613,7 +622,13 @@ service cloud.firestore {
             'reservationReleasedAt',
             'consumedAt',
             'consumptionTransactionId',
+            'consumptionRefundedAt',
+            'consumptionRefundTransactionId',
             'consumeAfter'
+            ,'consumptionDueAt'
+            ,'consumptionState'
+            ,'consumptionLastError'
+            ,'consumptionAttempts'
             ,'calendarSyncState'
             ,'calendarSyncAttempts'
             ,'calendarSyncLastError'
@@ -674,6 +689,10 @@ service cloud.firestore {
             'reservationStatus',
             'reservationReleasedAt',
             'consumeAfter'
+            ,'consumptionDueAt'
+            ,'consumptionState'
+            ,'consumptionLastError'
+            ,'consumptionAttempts'
             ,'calendarSyncState'
             ,'calendarSyncAttempts'
             ,'calendarSyncLastError'
@@ -709,6 +728,19 @@ service cloud.firestore {
           (
             request.resource.data.status != "canceled" ||
             request.resource.data.slot == resource.data.slot
+          ) &&
+          (
+            request.resource.data.status == "rescheduled" &&
+              request.resource.data.consumptionDueAt == request.resource.data.slot + request.resource.data.durationMinutes * 60 * 1000 &&
+              request.resource.data.consumptionState == "pending" ||
+            request.resource.data.status == "canceled" &&
+              (
+                resource.data.isFreeTrial == true && request.resource.data.consumptionDueAt == null && request.resource.data.consumptionState == "not-required" ||
+                resource.data.isFreeTrial == false && resource.data.slot <= request.time.toMillis() + 12 * 60 * 60 * 1000 &&
+                  request.resource.data.consumptionDueAt is number && request.resource.data.consumptionState == "pending" ||
+                resource.data.isFreeTrial == false && resource.data.slot > request.time.toMillis() + 12 * 60 * 60 * 1000 &&
+                  request.resource.data.consumptionDueAt == null && request.resource.data.consumptionState == "released"
+              )
           ) &&
           hasValidMeetingLink(request.resource.data) &&
           isSafeStatus(request.resource.data.status)
@@ -754,6 +786,11 @@ service cloud.firestore {
 
     match /teacherAccounting/{docId} {
       allow read, create, update, delete: if isTeacher();
+    }
+
+    match /financeOperations/{operationId} {
+      allow read, create: if isTeacher();
+      allow update, delete: if false;
     }
 
     match /bookingSlotClaims/{claimId} {

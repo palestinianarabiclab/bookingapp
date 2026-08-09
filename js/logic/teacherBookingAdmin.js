@@ -174,6 +174,8 @@ export async function cancelBooking({ db, firebase, bookingId }) {
             calendarNextRetryAt: canceledAt,
             reservationStatus: "released",
             reservationReleasedAt: canceledAt,
+            consumptionDueAt: null,
+            consumptionState: "released",
             notificationVersion,
             studentNotificationStatus: "pending",
             history: firebase.firestore.FieldValue.arrayUnion({
@@ -239,6 +241,8 @@ export async function rescheduleBooking({
         {
             slot: newSlot,
             consumeAfter: newSlot + Number(booking.durationMinutes || booking.slotMinutes || 50) * 60000,
+            consumptionDueAt: booking.isFreeTrial === true ? null : newSlot + Number(booking.durationMinutes || booking.slotMinutes || 50) * 60000,
+            consumptionState: booking.isFreeTrial === true ? "not-required" : "pending",
             status: "rescheduled",
             rescheduledFrom: booking.slot,
             rescheduledAt: changedAt,
@@ -300,6 +304,8 @@ export async function resizeBookingDuration({
         {
             durationMinutes,
             consumeAfter: Number(booking.slot || 0) + durationMinutes * 60000,
+            consumptionDueAt: booking.isFreeTrial === true ? null : Number(booking.slot || 0) + durationMinutes * 60000,
+            consumptionState: booking.isFreeTrial === true ? "not-required" : "pending",
             updatedAt,
             studentNotice: `Your teacher changed the lesson duration to ${durationMinutes} minutes.`,
             studentNoticeAt: updatedAt,

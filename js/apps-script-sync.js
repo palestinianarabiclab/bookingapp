@@ -326,6 +326,10 @@ async function runAutomaticCalendarSyncNow() {
     return callAppsScript("runCalendarSync");
 }
 
+async function runLessonConsumptionNow() {
+    return callAppsScript("runLessonConsumption");
+}
+
 async function retryFailedNotifications() {
     return callAppsScript("retryFailedNotifications");
 }
@@ -346,4 +350,5 @@ window.rescheduleBookingViaAppsScript = rescheduleBookingViaAppsScript;
 window.syncPendingBookingsViaAppsScript = syncPendingBookingsViaAppsScript;
 window.installAutomaticCalendarSync = installAutomaticCalendarSync;
 window.runAutomaticCalendarSyncNow = runAutomaticCalendarSyncNow;
+window.runLessonConsumptionNow = runLessonConsumptionNow;
 window.retryFailedNotifications = retryFailedNotifications;

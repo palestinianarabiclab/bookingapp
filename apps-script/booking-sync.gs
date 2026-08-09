@@ -316,11 +316,11 @@ function reconcileStudentBalancesFromFirestore() {
       ScriptApp.deleteTrigger(trigger);
     }
   });
-  console.log('Legacy balance reconciliation trigger removed. Student balances are managed by Firestore booking transactions.');
+  console.log('Legacy standalone balance trigger removed. The unified five-minute worker handles atomic lesson consumption.');
   return {
     success: true,
     skipped: true,
-    message: 'Legacy balance reconciliation is no longer required.'
+    message: 'Legacy standalone balance reconciliation is no longer required; processCalendarSynchronization handles it.'
   };
 }
 
@@ -797,6 +797,13 @@ function fsArray_(doc, name) {
   return value && value.arrayValue && Array.isArray(value.arrayValue.values) ? value.arrayValue.values : [];
 }
 
+function fsHistoryHasAction_(doc, action) {
+  return fsArray_(doc, 'history').some(function (value) {
+    return value && value.mapValue && value.mapValue.fields && value.mapValue.fields.action &&
+      String(value.mapValue.fields.action.stringValue || '') === action;
+  });
+}
+
 function firestoreValue_(value) {
   if (value === null || value === undefined) return { nullValue: null };
   if (typeof value === 'boolean') return { booleanValue: value };
@@ -808,6 +815,261 @@ function firestoreValue_(value) {
     return { mapValue: { fields: fields } };
   }
   return { stringValue: String(value) };
+}
+
+function firestoreDocumentName_(config, path) {
+  return firestoreBaseUrl_(config.firebaseProjectId) + '/' + path;
+}
+
+function firestoreBatchGetAdmin_(config, documentNames, transaction) {
+  const rows = firestoreAdminFetch_(config, ':batchGet', {
+    method: 'post', contentType: 'application/json',
+    payload: JSON.stringify({ documents: documentNames, transaction: transaction })
+  });
+  return Array.isArray(rows) ? rows : [];
+}
+
+function batchGetFound_(rows, documentName) {
+  for (var i = 0; i < rows.length; i += 1) {
+    if (rows[i].found && rows[i].found.name === documentName) return rows[i].found;
+  }
+  return null;
+}
+
+function cloneFirestoreFields_(doc) {
+  return JSON.parse(JSON.stringify((doc && doc.fields) || {}));
+}
+
+function appendFirestoreArrayValue_(fields, fieldName, value) {
+  const current = fields[fieldName] && fields[fieldName].arrayValue && Array.isArray(fields[fieldName].arrayValue.values)
+    ? fields[fieldName].arrayValue.values.slice() : [];
+  current.push(value);
+  fields[fieldName] = { arrayValue: { values: current } };
+}
+
+function firestoreWriteExisting_(doc, fields) {
+  return { update: { name: doc.name, fields: fields }, currentDocument: { updateTime: doc.updateTime } };
+}
+
+function queryDueConsumptionBookingsAdmin_(config, now, limit) {
+  const result = firestoreAdminFetch_(config, ':runQuery', {
+    method: 'post', contentType: 'application/json',
+    payload: JSON.stringify({ structuredQuery: {
+      from: [{ collectionId: 'bookings' }],
+      where: { fieldFilter: { field: { fieldPath: 'consumptionDueAt' }, op: 'LESS_THAN_OR_EQUAL', value: firestoreValue_(now) } },
+      orderBy: [{ field: { fieldPath: 'consumptionDueAt' }, direction: 'ASCENDING' }],
+      limit: Math.max(1, Math.min(100, Number(limit || 50)))
+    } })
+  });
+  return Array.isArray(result) ? result.map(function (row) { return row.document; }).filter(Boolean) : [];
+}
+
+function consumeOneBookingAdmin_(config, candidate, now) {
+  const bookingId = firestoreDocId_(candidate);
+  const bookingName = firestoreDocumentName_(config, 'bookings/' + bookingId);
+  const begin = firestoreAdminFetch_(config, ':beginTransaction', {
+    method: 'post', contentType: 'application/json', payload: JSON.stringify({ options: { readWrite: {} } })
+  });
+  const transaction = begin.transaction;
+  try {
+    const bookingRows = firestoreBatchGetAdmin_(config, [bookingName], transaction);
+    const booking = batchGetFound_(bookingRows, bookingName);
+    if (!booking) return { consumed: false, reason: 'missing-booking' };
+    if (fsNumber_(booking, 'balanceChargedAt') || fsBool_(booking, 'balanceCharged')) {
+      const fields = cloneFirestoreFields_(booking);
+      fields.consumptionDueAt = firestoreValue_(null);
+      fields.consumptionState = firestoreValue_('consumed');
+      firestoreAdminFetch_(config, ':commit', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ transaction: transaction, writes: [firestoreWriteExisting_(booking, fields)] }) });
+      return { consumed: false, reason: 'already-consumed' };
+    }
+    const studentUid = fsString_(booking, 'studentUid');
+    const pricingVersion = fsString_(booking, 'pricingVersion');
+    if (fsBool_(booking, 'isFreeTrial')) {
+      const fields = cloneFirestoreFields_(booking);
+      fields.consumptionDueAt = firestoreValue_(null);
+      fields.consumptionState = firestoreValue_('not-required');
+      firestoreAdminFetch_(config, ':commit', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ transaction: transaction, writes: [firestoreWriteExisting_(booking, fields)] }) });
+      return { consumed: false, reason: 'free-trial' };
+    }
+    if (!studentUid || !pricingVersion || pricingVersion === 'legacy-unpriced') {
+      const fields = cloneFirestoreFields_(booking);
+      fields.consumptionDueAt = firestoreValue_(null);
+      fields.consumptionState = firestoreValue_('failed');
+      fields.consumptionLastError = firestoreValue_('Missing student or historical pricing snapshot.');
+      firestoreAdminFetch_(config, ':commit', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ transaction: transaction, writes: [firestoreWriteExisting_(booking, fields)] }) });
+      return { consumed: false, reason: 'missing-accounting' };
+    }
+    const accountingName = firestoreDocumentName_(config, 'studentAccounting/' + studentUid);
+    const entitlementName = firestoreDocumentName_(config, 'studentEntitlements/' + studentUid);
+    const pricingName = firestoreDocumentName_(config, 'pricingSnapshots/' + pricingVersion);
+    const ledgerName = firestoreDocumentName_(config, 'lessonTransactions/booking_' + bookingId + '_consume');
+    const rows = firestoreBatchGetAdmin_(config, [accountingName, entitlementName, pricingName, ledgerName], transaction);
+    const accounting = batchGetFound_(rows, accountingName);
+    const entitlement = batchGetFound_(rows, entitlementName);
+    const pricing = batchGetFound_(rows, pricingName);
+    const ledger = batchGetFound_(rows, ledgerName);
+    if (ledger) {
+      const fields = cloneFirestoreFields_(booking);
+      fields.consumptionDueAt = firestoreValue_(null);
+      fields.consumptionState = firestoreValue_('consumed');
+      firestoreAdminFetch_(config, ':commit', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ transaction: transaction, writes: [firestoreWriteExisting_(booking, fields)] }) });
+      return { consumed: false, reason: 'ledger-exists' };
+    }
+    if (!accounting || !entitlement || !pricing) throw new Error('Missing accounting, entitlement, or pricing snapshot for ' + bookingId + '.');
+    const lessonPrice = fsNumber_(pricing, 'effectivePrice');
+    if (!(lessonPrice > 0)) throw new Error('Invalid historical lesson price for ' + bookingId + '.');
+    const status = fsString_(booking, 'status') || 'booked';
+    const canceledAt = fsNumber_(booking, 'canceledAt');
+    const lateCanceled = status === 'canceled' && !fsHistoryHasAction_(booking, 'calendar-conflict') && fsString_(booking, 'canceledBy') === 'student' && canceledAt && fsNumber_(booking, 'slot') - canceledAt < 12 * 60 * 60 * 1000;
+    if (status === 'canceled' && !lateCanceled) {
+      const fields = cloneFirestoreFields_(booking);
+      fields.consumptionDueAt = firestoreValue_(null);
+      fields.consumptionState = firestoreValue_('not-required');
+      firestoreAdminFetch_(config, ':commit', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ transaction: transaction, writes: [firestoreWriteExisting_(booking, fields)] }) });
+      return { consumed: false, reason: 'non-chargeable-cancellation' };
+    }
+    const reason = lateCanceled ? 'late-cancel' : 'lesson';
+    const reservationStatus = fsString_(booking, 'reservationStatus');
+    const wasReserved = reservationStatus === 'reserved' || reservationStatus === 'pending-late-consumption' || (!reservationStatus && fsNumber_(entitlement, 'reservedLessonCredits') > 0);
+    const accountingFields = cloneFirestoreFields_(accounting);
+    const entitlementFields = cloneFirestoreFields_(entitlement);
+    const bookingFields = cloneFirestoreFields_(booking);
+    const newBalance = fsNumber_(accounting, 'balance') - lessonPrice;
+    appendFirestoreArrayValue_(accountingFields, 'transactions', firestoreValue_({
+      id: 'tx_' + bookingId + '_charge', at: now, amount: -lessonPrice, type: reason,
+      description: lateCanceled ? 'Late cancellation lesson charge' : 'Lesson deduction', newBalance: newBalance
+    }));
+    accountingFields.balance = firestoreValue_(newBalance);
+    accountingFields.financeUpdatedAt = firestoreValue_(now);
+    entitlementFields.lessonCredits = firestoreValue_(Math.max(0, fsNumber_(entitlement, 'lessonCredits') - 1));
+    entitlementFields.reservedLessonCredits = firestoreValue_(Math.max(0, fsNumber_(entitlement, 'reservedLessonCredits') - (wasReserved ? 1 : 0)));
+    entitlementFields.entitlementUpdatedAt = firestoreValue_(now);
+    bookingFields.balanceChargedAt = firestoreValue_(now);
+    bookingFields.chargeReason = firestoreValue_(reason);
+    bookingFields.reservationStatus = firestoreValue_('consumed');
+    bookingFields.consumedAt = firestoreValue_(now);
+    bookingFields.consumptionTransactionId = firestoreValue_('booking_' + bookingId + '_consume');
+    bookingFields.consumptionDueAt = firestoreValue_(null);
+    bookingFields.consumptionState = firestoreValue_('consumed');
+    bookingFields.consumptionLastError = firestoreValue_('');
+    bookingFields.updatedAt = firestoreValue_(now);
+    appendFirestoreArrayValue_(bookingFields, 'history', firestoreValue_({ at: now, action: 'lesson-consumed', by: 'system', reason: reason }));
+    const ledgerFields = {
+      studentUid: firestoreValue_(studentUid), bookingId: firestoreValue_(bookingId), type: firestoreValue_('consume'),
+      lessonDelta: firestoreValue_(-1), moneyDelta: firestoreValue_(-lessonPrice),
+      priceSnapshot: { mapValue: { fields: cloneFirestoreFields_(pricing) } }, createdAt: firestoreValue_(now),
+      effectiveAt: firestoreValue_(fsNumber_(booking, 'consumeAfter') || fsNumber_(booking, 'consumptionDueAt'))
+    };
+    firestoreAdminFetch_(config, ':commit', {
+      method: 'post', contentType: 'application/json',
+      payload: JSON.stringify({ transaction: transaction, writes: [
+        firestoreWriteExisting_(accounting, accountingFields), firestoreWriteExisting_(entitlement, entitlementFields),
+        firestoreWriteExisting_(booking, bookingFields),
+        { update: { name: ledgerName, fields: ledgerFields }, currentDocument: { exists: false } }
+      ] })
+    });
+    return { consumed: true, reason: reason };
+  } catch (err) {
+    try { firestoreAdminFetch_(config, ':rollback', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ transaction: transaction }) }); } catch (ignored) {}
+    throw err;
+  }
+}
+
+function processDueLessonConsumption_(config) {
+  const due = queryDueConsumptionBookingsAdmin_(config, Date.now(), 20);
+  let consumed = 0;
+  let skipped = 0;
+  let failed = 0;
+  due.forEach(function (doc) {
+    try {
+      const result = consumeOneBookingAdmin_(config, doc, Date.now());
+      if (result.consumed) consumed += 1; else skipped += 1;
+    } catch (err) {
+      failed += 1;
+      try {
+        firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(firestoreDocId_(doc)), {
+          consumptionState: 'retrying', consumptionAttempts: fsNumber_(doc, 'consumptionAttempts') + 1,
+          consumptionLastError: String(err && err.message || err).slice(0, 500), updatedAt: Date.now()
+        });
+      } catch (patchErr) {}
+      console.error('Lesson consumption failed for ' + firestoreDocId_(doc) + ': ' + String(err && err.message || err));
+    }
+  });
+  return { consumed: consumed, skipped: skipped, failed: failed, checked: due.length };
+}
+
+function releaseStudentReservationAdmin_(config, studentUid) {
+  const name = firestoreDocumentName_(config, 'studentEntitlements/' + studentUid);
+  const begin = firestoreAdminFetch_(config, ':beginTransaction', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ options: { readWrite: {} } }) });
+  const transaction = begin.transaction;
+  try {
+    const doc = batchGetFound_(firestoreBatchGetAdmin_(config, [name], transaction), name);
+    if (!doc) return;
+    const fields = cloneFirestoreFields_(doc);
+    fields.reservedLessonCredits = firestoreValue_(Math.max(0, fsNumber_(doc, 'reservedLessonCredits') - 1));
+    fields.entitlementUpdatedAt = firestoreValue_(Date.now());
+    firestoreAdminFetch_(config, ':commit', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ transaction: transaction, writes: [firestoreWriteExisting_(doc, fields)] }) });
+  } catch (err) {
+    try { firestoreAdminFetch_(config, ':rollback', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ transaction: transaction }) }); } catch (ignored) {}
+    throw err;
+  }
+}
+
+function cancelExternalBookingAdmin_(config, bookingId, studentUid) {
+  const bookingName = firestoreDocumentName_(config, 'bookings/' + bookingId);
+  const entitlementName = studentUid ? firestoreDocumentName_(config, 'studentEntitlements/' + studentUid) : '';
+  const begin = firestoreAdminFetch_(config, ':beginTransaction', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ options: { readWrite: {} } }) });
+  const transaction = begin.transaction;
+  try {
+    const names = entitlementName ? [bookingName, entitlementName] : [bookingName];
+    const rows = firestoreBatchGetAdmin_(config, names, transaction);
+    const booking = batchGetFound_(rows, bookingName);
+    const entitlement = entitlementName ? batchGetFound_(rows, entitlementName) : null;
+    if (!booking || fsString_(booking, 'status') === 'canceled') {
+      firestoreAdminFetch_(config, ':rollback', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ transaction: transaction }) });
+      return false;
+    }
+    const now = Date.now();
+    const bookingFields = cloneFirestoreFields_(booking);
+    bookingFields.status = firestoreValue_('canceled'); bookingFields.canceledAt = firestoreValue_(now);
+    bookingFields.canceledBy = firestoreValue_('external-calendar'); bookingFields.reservationStatus = firestoreValue_('released');
+    bookingFields.reservationReleasedAt = firestoreValue_(now); bookingFields.consumptionDueAt = firestoreValue_(null);
+    bookingFields.consumptionState = firestoreValue_('released'); bookingFields.calendarSynced = firestoreValue_(false);
+    bookingFields.calendarSyncState = firestoreValue_('externally-deleted');
+    bookingFields.calendarSyncLastError = firestoreValue_('The platform Calendar event was deleted directly in Google Calendar.');
+    bookingFields.calendarLastCheckedAt = firestoreValue_(now); bookingFields.updatedAt = firestoreValue_(now);
+    const notificationVersion = fsNumber_(booking, 'notificationVersion') + 1;
+    const studentEmail = normalizeEmail_(fsString_(booking, 'email'));
+    const validStudentEmail = isValidEmail_(studentEmail);
+    const jobId = 'booking_' + bookingId.replace(/[^a-zA-Z0-9_-]/g, '_') + '_external-cancellation_' + notificationVersion + '_student';
+    const jobName = firestoreDocumentName_(config, 'notificationJobs/' + jobId);
+    bookingFields.notificationVersion = firestoreValue_(notificationVersion);
+    bookingFields.studentNotificationStatus = firestoreValue_(validStudentEmail ? 'pending' : 'skipped');
+    bookingFields.studentNotificationAttempts = firestoreValue_(0);
+    bookingFields.studentNotificationLastError = firestoreValue_(validStudentEmail ? '' : 'Missing or invalid student email.');
+    const writes = [firestoreWriteExisting_(booking, bookingFields)];
+    if (entitlement && fsString_(booking, 'reservationStatus') === 'reserved') {
+      const entitlementFields = cloneFirestoreFields_(entitlement);
+      entitlementFields.reservedLessonCredits = firestoreValue_(Math.max(0, fsNumber_(entitlement, 'reservedLessonCredits') - 1));
+      entitlementFields.entitlementUpdatedAt = firestoreValue_(now);
+      writes.push(firestoreWriteExisting_(entitlement, entitlementFields));
+    }
+    writes.push({
+      update: { name: jobName, fields: {
+        id: firestoreValue_(jobId), bookingId: firestoreValue_(bookingId), recipientType: firestoreValue_('student'),
+        recipientEmail: firestoreValue_(studentEmail), notificationType: firestoreValue_('external-cancellation'),
+        version: firestoreValue_(notificationVersion), state: firestoreValue_(validStudentEmail ? 'pending' : 'skipped'),
+        attempts: firestoreValue_(0), createdAt: firestoreValue_(now), createdBy: firestoreValue_('external-calendar'),
+        sentAt: firestoreValue_(null), lastAttemptAt: firestoreValue_(null), nextRetryAt: firestoreValue_(validStudentEmail ? now : 0),
+        lastError: firestoreValue_(validStudentEmail ? '' : 'Missing or invalid student email.'), idempotencyKey: firestoreValue_(jobId)
+      } }, currentDocument: { exists: false }
+    });
+    firestoreAdminFetch_(config, ':commit', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ transaction: transaction, writes: writes }) });
+    return true;
+  } catch (err) {
+    try { firestoreAdminFetch_(config, ':rollback', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ transaction: transaction }) }); } catch (ignored) {}
+    throw err;
+  }
 }
 
 function firestorePatchAdmin_(config, documentPath, values) {
@@ -835,7 +1097,7 @@ function queryBookingsAdmin_(config, filters, limit) {
   const where = fieldFilters.length === 1 ? fieldFilters[0] : { compositeFilter: { op: 'AND', filters: fieldFilters } };
   const result = firestoreAdminFetch_(config, ':runQuery', {
     method: 'post', contentType: 'application/json',
-    payload: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'bookings' }], where: where, limit: Math.max(1, Math.min(200, Number(limit || 50))) } }),
+    payload: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'bookings' }], where: where, limit: Math.max(1, Math.min(500, Number(limit || 50))) } }),
   });
   return Array.isArray(result) ? result.map(function (row) { return row.document; }).filter(Boolean) : [];
 }
@@ -1130,6 +1392,8 @@ function reconcilePlatformCalendarEvents_(config) {
       }
       const notificationVersion = fsNumber_(doc, 'notificationVersion') + 1;
       values.slot = newSlot; values.durationMinutes = newDuration; values.consumeAfter = newSlot + newDuration * 60000;
+      values.consumptionDueAt = fsBool_(doc, 'isFreeTrial') ? null : values.consumeAfter;
+      values.consumptionState = fsBool_(doc, 'isFreeTrial') ? 'not-required' : 'pending';
       values.meetingUrl = meetingUrl; values.updatedAt = Date.now(); values.rescheduledFrom = oldSlot; values.rescheduledAt = Date.now();
       values.notificationVersion = notificationVersion;
       values.teacherNotificationStatus = 'pending'; values.studentNotificationStatus = 'pending';
@@ -1141,45 +1405,27 @@ function reconcilePlatformCalendarEvents_(config) {
     }
     firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), values);
   });
-  const syncedBookings = queryBookingsAdmin_(config, [{ field: 'calendarSynced', value: true }], 200);
+  const syncedBookingMap = {};
+  const reconciliationStart = Date.now() - 24 * 60 * 60 * 1000;
+  const reconciliationEnd = Date.now() + 366 * 24 * 60 * 60 * 1000;
+  const reconciliationWindow = 60 * 24 * 60 * 60 * 1000;
+  for (var windowStart = reconciliationStart; windowStart < reconciliationEnd; windowStart += reconciliationWindow) {
+    queryBookingsAdmin_(config, [
+      { field: 'slot', op: 'GREATER_THAN_OR_EQUAL', value: windowStart },
+      { field: 'slot', op: 'LESS_THAN', value: Math.min(reconciliationEnd, windowStart + reconciliationWindow) }
+    ], 500).forEach(function (bookingDoc) { syncedBookingMap[firestoreDocId_(bookingDoc)] = bookingDoc; });
+  }
+  const syncedBookings = Object.keys(syncedBookingMap).map(function (id) { return syncedBookingMap[id]; });
   syncedBookings.forEach(function (doc) {
     const bookingId = firestoreDocId_(doc);
     const status = fsString_(doc, 'status') || 'booked';
     const slot = fsNumber_(doc, 'slot');
     const duration = fsNumber_(doc, 'durationMinutes') || 50;
-    if (status === 'canceled' || slot + duration * 60000 <= Date.now() || byBookingId[bookingId]) return;
+    if (!fsBool_(doc, 'calendarSynced') || status === 'canceled' || slot + duration * 60000 <= Date.now() || byBookingId[bookingId]) return;
     const studentUid = fsString_(doc, 'studentUid');
-    firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), {
-      status: 'canceled', canceledAt: Date.now(), canceledBy: 'external-calendar',
-      reservationStatus: 'released', reservationReleasedAt: Date.now(),
-      calendarSynced: false, calendarSyncState: 'externally-deleted',
-      calendarSyncLastError: 'The platform Calendar event was deleted directly in Google Calendar.', calendarLastCheckedAt: Date.now(), updatedAt: Date.now()
-    });
+    if (!cancelExternalBookingAdmin_(config, bookingId, studentUid)) return;
     firestorePatchAdmin_(config, 'publicBookings/' + encodeURIComponent(bookingId), { status: 'canceled', calendarSynced: false, updatedAt: Date.now() });
     getSlotClaimIds_(slot, duration).forEach(function (id) { firestoreDeleteAdmin_(config, 'bookingSlotClaims/' + id); });
-    const notificationVersion = fsNumber_(doc, 'notificationVersion') + 1;
-    const externalJobId = 'booking_' + bookingId.replace(/[^a-zA-Z0-9_-]/g, '_') + '_external-cancellation_' + notificationVersion + '_student';
-    const studentEmail = normalizeEmail_(fsString_(doc, 'email'));
-    const validStudentEmail = isValidEmail_(studentEmail);
-    firestorePatchAdmin_(config, 'notificationJobs/' + externalJobId, {
-      id: externalJobId, bookingId: bookingId, recipientType: 'student', recipientEmail: studentEmail,
-      notificationType: 'external-cancellation', version: notificationVersion,
-      state: validStudentEmail ? 'pending' : 'skipped', attempts: 0, createdAt: Date.now(), createdBy: 'external-calendar',
-      sentAt: null, lastAttemptAt: null, nextRetryAt: validStudentEmail ? Date.now() : 0,
-      lastError: validStudentEmail ? '' : 'Missing or invalid student email.', idempotencyKey: externalJobId
-    });
-    firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), {
-      notificationVersion: notificationVersion, studentNotificationStatus: validStudentEmail ? 'pending' : 'skipped',
-      studentNotificationAttempts: 0, studentNotificationLastError: validStudentEmail ? '' : 'Missing or invalid student email.'
-    });
-    if (studentUid && fsString_(doc, 'reservationStatus') === 'reserved') {
-      try {
-        const userDoc = firestoreAdminFetch_(config, '/users/' + encodeURIComponent(studentUid), { method: 'get' });
-        firestorePatchAdmin_(config, 'users/' + encodeURIComponent(studentUid), {
-          reservedLessonCredits: Math.max(0, fsNumber_(userDoc, 'reservedLessonCredits') - 1), entitlementUpdatedAt: Date.now()
-        });
-      } catch (err) {}
-    }
   });
   return byBookingId;
 }
@@ -1190,6 +1436,7 @@ function processCalendarSynchronization() {
   lock.waitLock(20000);
   let processed = 0;
   let failed = 0;
+  let consumptionResult = { consumed: 0, skipped: 0, failed: 0, checked: 0 };
   try {
     const pendingCreates = queryBookingsAdmin_(config, [{ field: 'calendarSynced', value: false }], 50);
     pendingCreates.forEach(function (doc) {
@@ -1208,10 +1455,13 @@ function processCalendarSynchronization() {
       }
     });
     reconcilePlatformCalendarEvents_(config);
+    consumptionResult = processDueLessonConsumption_(config);
+    processed += consumptionResult.consumed;
+    failed += consumptionResult.failed;
     const notificationResult = processPendingNotificationJobs_(config, '');
     processed += notificationResult.processed;
   } finally { lock.releaseLock(); }
-  return { success: failed === 0, processed: processed, failed: failed, message: 'Calendar background synchronization finished.' };
+  return { success: failed === 0, processed: processed, failed: failed, consumption: consumptionResult, message: 'Calendar, notification, and lesson-consumption background synchronization finished.' };
 }
 
 function installCalendarSyncTrigger() {
@@ -1260,6 +1510,11 @@ function handleRequest_(e) {
     if (action === 'runCalendarSync') {
       requireTeacherCaller_(config, req.authToken);
       return jsonOut(processCalendarSynchronization());
+    }
+
+    if (action === 'runLessonConsumption') {
+      requireTeacherCaller_(config, req.authToken);
+      return jsonOut({ success: true, consumption: processDueLessonConsumption_(config) });
     }
 
     if (action === 'retryFailedNotifications') {

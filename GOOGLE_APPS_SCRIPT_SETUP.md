@@ -134,6 +134,7 @@ If you also have busy events on another Google Calendar:
 ## Notes
 
 - This removes the dependency on the teacher page staying open.
+- The same five-minute trigger now performs atomic due-lesson consumption from the targeted `consumptionDueAt` queue. Do not install the removed legacy balance trigger.
 - It does not use the browser Google token for booking sync.
 - If Apps Script cannot access the Preply calendar, the Google account that owns the script likely does not have permission to that calendar.
 - Reminder email sending uses your Apps Script / Gmail daily quota.

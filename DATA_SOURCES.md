@@ -6,6 +6,8 @@
 - Global default price: `teacherAccounting/global`.
 - Historical price: immutable `pricingSnapshots/{pricingVersion}`, referenced by the booking and copied into its one-time `lessonTransactions` consumption record.
 - Consumption: immutable deterministic `lessonTransactions/booking_{bookingId}_consume`.
+- Due-consumption queue: `bookings.consumptionDueAt`; the Apps Script worker consumes it transactionally and clears it.
+- Teacher financial mutations/refunds/package approvals: immutable `financeOperations` operation IDs.
 - Calendar identity and Meet link: booking Calendar sync metadata reconciled with Google.
 - External Google/Preply entries: busy blocks only; they are never platform bookings.
 - Notification delivery: `notificationJobs`.

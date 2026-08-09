@@ -24,6 +24,7 @@ import {
 import { dedupeCalendarBusyBlocks } from "./logic/calendarSyncState.js?v=20260808-phase2-sync-v1";
 import { createNotificationJob } from "./logic/notificationJobs.js?v=20260808-phase3-notifications-v1";
 import { resolvePriceSnapshot, pricingDifference, historicalPriceLabel, validPrice } from "./logic/lessonPricing.js?v=20260808-phase45-pricing-v1";
+import { packageCreditValue, refundedLessonCount } from "./logic/financeAccounting.js?v=20260809-finance-integrity-v1";
 import {
     renderTeacherBookings,
     cancelBooking,
@@ -2473,13 +2474,15 @@ async function cancelStudentBooking(bookingId) {
             alreadyCanceled = true;
             return;
         }
-        const isLateCancel = Number(booking.slot || 0) - canceledAt < STUDENT_CHANGE_CUTOFF_MS;
+        const isLateCancel = booking.isFreeTrial !== true && Number(booking.slot || 0) - canceledAt < STUDENT_CHANGE_CUTOFF_MS;
         const notificationVersion = Number(booking.notificationVersion || 0) + 1;
         transaction.set(bookingRef, {
             status: "canceled", updatedAt: canceledAt, calendarSynced: false,
             calendarDeletePending: true, canceledAt, canceledBy: "student",
             calendarSyncState: "pending-delete", calendarNextRetryAt: canceledAt,
             reservationStatus: isLateCancel ? "pending-late-consumption" : "released",
+            consumptionDueAt: isLateCancel ? canceledAt : null,
+            consumptionState: booking.isFreeTrial === true ? "not-required" : isLateCancel ? "pending" : "released",
             reservationReleasedAt: isLateCancel ? null : canceledAt,
             notificationVersion,
             teacherNotificationStatus: "pending",
@@ -2596,6 +2599,8 @@ async function rescheduleStudentBooking(bookingId, newSlot) {
         transaction.set(window.db.collection("bookings").doc(bookingId), {
             slot: newSlot,
             consumeAfter: newSlot + durationMinutes * 60000,
+            consumptionDueAt: booking.isFreeTrial === true ? null : newSlot + durationMinutes * 60000,
+            consumptionState: booking.isFreeTrial === true ? "not-required" : "pending",
             status: "rescheduled",
             updatedAt: changedAt,
             calendarSynced: true,
@@ -2991,12 +2996,27 @@ async function createCalendarEventForBooking(bookingId, booking, slot) {
 async function commitTeacherBookingWithClaims(bookingRef, bookingData, publicBookingData) {
     const claimRefs = getBookingSlotClaimIds(bookingData.slot, bookingData.durationMinutes)
         .map((id) => window.db.collection("bookingSlotClaims").doc(id));
+    const entitlementRef = bookingData.studentUid ? window.db.collection("studentEntitlements").doc(bookingData.studentUid) : null;
     await window.db.runTransaction(async (transaction) => {
-        const claims = await Promise.all(claimRefs.map((ref) => transaction.get(ref)));
+        const [claims, entitlementSnap] = await Promise.all([
+            Promise.all(claimRefs.map((ref) => transaction.get(ref))),
+            entitlementRef ? transaction.get(entitlementRef) : Promise.resolve(null),
+        ]);
         if (claims.some((claim) => claim.exists && claim.data()?.bookingId !== bookingRef.id)) {
             throw new Error("That time overlaps another platform lesson.");
         }
-        transaction.set(bookingRef, bookingData);
+        const entitlement = entitlementSnap?.exists ? (entitlementSnap.data() || {}) : {};
+        if (bookingData.isFreeTrial !== true && entitlementRef) {
+            const credits = Math.max(0, Number(entitlement.lessonCredits || 0));
+            const reserved = Math.max(0, Number(entitlement.reservedLessonCredits || 0));
+            if (entitlement.allowOverdraft !== true && credits - reserved < 1) throw new Error("This student has no available lesson credit. Enable overdraft booking first if intended.");
+            transaction.set(entitlementRef, { reservedLessonCredits: reserved + 1, entitlementUpdatedAt: Date.now() }, { merge: true });
+        }
+        transaction.set(bookingRef, {
+            ...bookingData,
+            reservationStatus: bookingData.isFreeTrial === true ? "not-required" : "reserved",
+            reservedAt: bookingData.createdAt || Date.now(),
+        });
         transaction.set(window.db.collection("publicBookings").doc(bookingRef.id), publicBookingData);
         if (bookingData.source === "teacher") {
             const job = createNotificationJob({ bookingId: bookingRef.id, notificationType: "teacher-created", recipientType: "student", recipientEmail: bookingData.email || "", version: 0, createdAt: bookingData.createdAt, createdBy: "teacher" });
@@ -3017,6 +3037,19 @@ async function releaseBookingSlotClaims(bookingId, booking) {
     const batch = window.db.batch();
     ids.forEach((id) => batch.delete(window.db.collection("bookingSlotClaims").doc(id)));
     await batch.commit();
+}
+
+async function releaseTeacherCreatedReservation(booking) {
+    if (!booking?.studentUid || booking.isFreeTrial === true) return;
+    const ref = window.db.collection("studentEntitlements").doc(booking.studentUid);
+    await window.db.runTransaction(async (transaction) => {
+        const snap = await transaction.get(ref);
+        if (!snap.exists) return;
+        transaction.set(ref, {
+            reservedLessonCredits: Math.max(0, Number(snap.data()?.reservedLessonCredits || 0) - 1),
+            entitlementUpdatedAt: Date.now(),
+        }, { merge: true });
+    });
 }
 
 function getWeeklyRecurringSlot(slot, weekNumber, timezone) {
@@ -3056,6 +3089,10 @@ async function createWeeklyRecurringLessons(booking, additionalCount) {
             calendarSyncState: "pending-create",
             calendarSyncAttempts: 0,
             consumeAfter: slot + durationMinutes * 60000,
+            consumptionDueAt: slot + durationMinutes * 60000,
+            consumptionState: "pending",
+            consumptionLastError: "",
+            consumptionAttempts: 0,
             googleCalendarEventId: "",
             meetingUrl: "",
             source: "teacher",
@@ -3097,6 +3134,10 @@ async function createWeeklyRecurringLessons(booking, additionalCount) {
                 calendarSynced: false,
                 canceledAt,
                 canceledBy: "teacher",
+                reservationStatus: "released",
+                reservationReleasedAt: canceledAt,
+                consumptionDueAt: null,
+                consumptionState: "released",
             }, { merge: true });
             cancelBatch.set(window.db.collection("publicBookings").doc(bookingRef.id), {
                 status: "canceled",
@@ -3105,6 +3146,7 @@ async function createWeeklyRecurringLessons(booking, additionalCount) {
             }, { merge: true });
             await cancelBatch.commit();
             await releaseBookingSlotClaims(bookingRef.id, recurringBooking);
+            await releaseTeacherCreatedReservation(recurringBooking);
             throw new Error(calendarResult.message || "Google Calendar rejected a recurring lesson.");
         }
         await bookingRef.set({
@@ -3151,6 +3193,10 @@ async function createTeacherLessonForStudent(student, slot, durationMinutes) {
         calendarSyncState: "pending-create",
         calendarSyncAttempts: 0,
         consumeAfter: slot + durationMinutes * 60000,
+        consumptionDueAt: slot + durationMinutes * 60000,
+        consumptionState: "pending",
+        consumptionLastError: "",
+        consumptionAttempts: 0,
         googleCalendarEventId: "",
         meetingUrl: "",
         source: "teacher",
@@ -3191,6 +3237,10 @@ async function createTeacherLessonForStudent(student, slot, durationMinutes) {
             updatedAt: canceledAt,
             canceledAt,
             canceledBy: "teacher",
+            reservationStatus: "released",
+            reservationReleasedAt: canceledAt,
+            consumptionDueAt: null,
+            consumptionState: "released",
         }, { merge: true });
         cancelBatch.set(window.db.collection("publicBookings").doc(bookingRef.id), {
             status: "canceled",
@@ -3198,6 +3248,7 @@ async function createTeacherLessonForStudent(student, slot, durationMinutes) {
         }, { merge: true });
         await cancelBatch.commit();
         await releaseBookingSlotClaims(bookingRef.id, bookingData);
+        await releaseTeacherCreatedReservation(bookingData);
         throw new Error(calendarResult.message || "Google Calendar rejected the lesson.");
     }
     const syncedAt = Date.now();
@@ -6395,11 +6446,16 @@ function renderStudentLessonRecords(rows, className) {
         const accounting = accountingEntries[0] || null;
         const difference = pricingDifference(accounting?.priceSnapshot);
         const duplicateWarning = accountingEntries.length > 1 ? ` | WARNING: ${accountingEntries.length} consumption ledger records for this booking` : "";
+        const refundDetail = booking.consumptionRefundedAt ? ` | Refunded: ${formatSlotTime(booking.consumptionRefundedAt)}` : "";
         const priceDetail = accounting
-            ? ` | Lesson deducted: ${accountingEntries.length} | Ledger: ${accountingEntries.map((entry) => entry.id || "legacy").join(", ")} | Reason: ${accounting.type || booking.chargeReason || "lesson"} | Price: ${historicalPriceLabel(accounting.priceSnapshot)} | Pricing: ${accounting.priceSnapshot?.source || "legacy"}${difference?.kind === "discount" ? ` | Discount: $${difference.amount}` : difference?.kind === "adjustment" ? ` | Adjustment: $${difference.amount}` : ""} | Consumed: ${formatSlotTime(accounting.createdAt)}${duplicateWarning}`
+            ? ` | Lesson deducted: ${accountingEntries.length} | Ledger: ${accountingEntries.map((entry) => entry.id || "legacy").join(", ")} | Reason: ${accounting.type || booking.chargeReason || "lesson"} | Price: ${historicalPriceLabel(accounting.priceSnapshot)} | Pricing: ${accounting.priceSnapshot?.source || "legacy"}${difference?.kind === "discount" ? ` | Discount: $${difference.amount}` : difference?.kind === "adjustment" ? ` | Adjustment: $${difference.amount}` : ""} | Consumed: ${formatSlotTime(accounting.createdAt)}${refundDetail}${duplicateWarning}`
             : (status === "completed" || isLessonHistorical(booking, Date.now())) ? " | Accounting: unavailable/legacy" : "";
-        const detail = `${booking.isFreeTrial ? "Free trial" : `${duration} minutes | ${status}`} | Booking ID: ${booking.id || "legacy"} | Student email: ${emailState}${priceDetail}`;
-        return `<div class="student-lesson-record ${className}"><strong>${escapeHtml(dateLabel)}</strong><span>${escapeHtml(detail)}</span></div>`;
+        const consumptionHealth = booking.consumptionState === "failed" || booking.consumptionState === "retrying"
+            ? ` | Consumption: ${booking.consumptionState} (${booking.consumptionLastError || "unknown error"})` : "";
+        const detail = `${booking.isFreeTrial ? "Free trial" : `${duration} minutes | ${status}`} | Booking ID: ${booking.id || "legacy"} | Student email: ${emailState}${priceDetail}${consumptionHealth}`;
+        const refundButton = accounting && !booking.consumptionRefundedAt
+            ? `<button type="button" class="btn btn--outline btn--small" data-refund-consumption="${escapeHtml(booking.id)}" data-student-id="${escapeHtml(booking.studentUid || "")}">Refund this deduction</button>` : "";
+        return `<div class="student-lesson-record ${className}"><strong>${escapeHtml(dateLabel)}</strong><span>${escapeHtml(detail)}</span>${refundButton}</div>`;
     }).join("");
 }
 
@@ -6412,6 +6468,44 @@ function getBookingSlotMs(value) {
     if (Number.isFinite(numeric)) return numeric;
     const parsed = Date.parse(String(value || ""));
     return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function refundBookingConsumption(studentId, bookingId) {
+    const operationRef = window.db.collection("financeOperations").doc(`booking_${bookingId}_consumption_refund`);
+    const bookingRef = window.db.collection("bookings").doc(bookingId);
+    const ledgerRef = window.db.collection("lessonTransactions").doc(`booking_${bookingId}_consume`);
+    const accountingRef = window.db.collection("studentAccounting").doc(studentId);
+    const entitlementRef = window.db.collection("studentEntitlements").doc(studentId);
+    const refundedAt = Date.now();
+    await window.db.runTransaction(async (transaction) => {
+        const [operationSnap, bookingSnap, ledgerSnap, accountingSnap, entitlementSnap] = await Promise.all([
+            transaction.get(operationRef), transaction.get(bookingRef), transaction.get(ledgerRef),
+            transaction.get(accountingRef), transaction.get(entitlementRef),
+        ]);
+        if (operationSnap.exists) return;
+        if (!bookingSnap.exists || !ledgerSnap.exists || !accountingSnap.exists || !entitlementSnap.exists) throw new Error("The original deduction records are incomplete.");
+        const booking = bookingSnap.data() || {};
+        if (booking.consumptionRefundedAt) return;
+        const ledger = ledgerSnap.data() || {};
+        const amount = Math.abs(Number(ledger.moneyDelta || 0));
+        const lessonCount = Math.abs(Number(ledger.lessonDelta || -1)) || 1;
+        if (!(amount > 0)) throw new Error("The historical deduction amount is unavailable.");
+        const accounting = accountingSnap.data() || {};
+        const entitlement = entitlementSnap.data() || {};
+        const newBalance = toMoneyValue(accounting.balance) + amount;
+        transaction.set(accountingRef, {
+            balance: newBalance,
+            transactions: window.firebase.firestore.FieldValue.arrayUnion({ id: operationRef.id, at: refundedAt, amount, type: "consumption-refund", description: `Refund for booking ${bookingId}`, newBalance }),
+            financeUpdatedAt: refundedAt,
+        }, { merge: true });
+        transaction.set(entitlementRef, { lessonCredits: Math.max(0, Number(entitlement.lessonCredits || 0) + lessonCount), entitlementUpdatedAt: refundedAt }, { merge: true });
+        transaction.set(bookingRef, {
+            consumptionRefundedAt: refundedAt, consumptionRefundTransactionId: operationRef.id,
+            reservationStatus: "refunded", consumptionState: "refunded", updatedAt: refundedAt,
+            history: window.firebase.firestore.FieldValue.arrayUnion({ at: refundedAt, action: "consumption-refunded", by: "teacher", lessonCount }),
+        }, { merge: true });
+        transaction.set(operationRef, { id: operationRef.id, studentUid, bookingId, type: "consumption-refund", balanceDelta: amount, lessonDelta: lessonCount, createdAt: refundedAt, createdBy: state.teacherUser.uid });
+    });
 }
 
 async function openStudentLessonsModal(student) {
@@ -6470,6 +6564,15 @@ async function openStudentLessonsModal(student) {
             ? `Duplicate deduction records detected: ${duplicateTransactions.map(([id, count]) => `${id} × ${count}`).join(", ")}`
             : `No duplicate deterministic deduction IDs found. Ledger deductions: ${snapshots[1].size}; financial charge entries: ${financialEntries.length}.`;
         content.innerHTML = `<div class="student-lessons-summary"><div><strong>${upcoming.length}</strong><span>Upcoming</span></div><div><strong>${taken.length}</strong><span>Taken</span></div><div><strong>${canceled.length}</strong><span>Canceled</span></div><div><strong>${Number(entitlement.lessonCredits || 0)}</strong><span>Owned lessons</span></div><div><strong>${Number(entitlement.reservedLessonCredits || 0)}</strong><span>Reserved</span></div><div><strong>${availableLessons}</strong><span>Available</span></div></div><p class="${auditClass}">${escapeHtml(auditText)}</p><p class="small-note">Teacher-only money balance: ${escapeHtml(formatMoney(studentAccounting.balance))}. Each lesson below shows its Booking ID, ledger ID, deduction reason, price snapshot, and consumption time.</p><div class="student-lessons-groups"><section class="student-lessons-group"><h4>Upcoming Lessons</h4>${renderStudentLessonRecords(upcoming, "")}</section><section class="student-lessons-group"><h4>Taken Lessons</h4>${renderStudentLessonRecords(taken, "student-lesson-record--taken")}</section><section class="student-lessons-group"><h4>Canceled Lessons</h4>${renderStudentLessonRecords(canceled, "student-lesson-record--canceled")}</section></div>`;
+        content.onclick = async (event) => {
+            const button = event.target.closest("[data-refund-consumption]");
+            if (!button) return;
+            const bookingId = button.dataset.refundConsumption;
+            if (!window.confirm("Refund this exact historical deduction and return its lesson credit?")) return;
+            await withButtonLoading(button, "Refunding...", () => refundBookingConsumption(button.dataset.studentId || student.id, bookingId));
+            await refreshTeacherStudents();
+            await openStudentLessonsModal(state.studentCache.get(student.id) || student);
+        };
     } catch (error) { content.innerHTML = `<div class="status-line is-error">${escapeHtml(error.message || "Could not load lesson history.")}</div>`; }
 }
 
@@ -6501,7 +6604,7 @@ async function migrateLegacyStudentFinancialData(userDocs, accounting, entitleme
             const existingAccounting = accounting.get(doc.id) || {};
             const existingEntitlement = entitlements.get(doc.id) || {};
             const defaultPrice = validPrice(getConfiguredLessonPrice());
-            const customPrice = validPrice(data.lessonPrice);
+            const customPrice = validPrice(existingAccounting.customLessonPrice ?? data.lessonPrice);
             const version = String(existingEntitlement.pricingVersion || `legacy_${doc.id}_${Date.now()}`);
             const snapshot = resolvePriceSnapshot({ defaultPrice, customPrice, version });
             batch.set(window.db.collection("studentAccounting").doc(doc.id), {
@@ -6555,6 +6658,11 @@ async function migrateLegacyFinancialPrivacy() {
         legacyBookings.slice(offset, offset + 150).forEach(({ doc, data }) => {
             const effectivePrice = validPrice(data.lessonPrice || data.chargedAmount);
             const version = effectivePrice ? `legacy_booking_${doc.id}` : "legacy-unpriced";
+            const status = String(data.status || "booked").toLowerCase();
+            const lateCanceled = status === "canceled" && String(data.canceledBy || "student").toLowerCase() === "student" && Number(data.canceledAt || 0) && Number(data.slot || 0) - Number(data.canceledAt || 0) < STUDENT_CHANGE_CUTOFF_MS;
+            const consumptionDueAt = data.balanceChargedAt || data.balanceCharged || data.isFreeTrial === true
+                ? null
+                : lateCanceled ? Number(data.canceledAt) : status !== "canceled" ? getLessonConsumeAfter(data) : null;
             if (effectivePrice) {
                 batch.set(window.db.collection("pricingSnapshots").doc(version), {
                     version, studentUid: data.studentUid || "", effectivePrice, currency: "USD",
@@ -6566,12 +6674,39 @@ async function migrateLegacyFinancialPrivacy() {
                 pricingVersion: version,
                 lessonPrice: window.firebase.firestore.FieldValue.delete(),
                 chargedAmount: window.firebase.firestore.FieldValue.delete(),
+                consumptionDueAt,
+                consumptionState: data.balanceChargedAt || data.balanceCharged ? "consumed" : data.isFreeTrial === true ? "not-required" : consumptionDueAt ? "pending" : "released",
+                consumptionAttempts: Number(data.consumptionAttempts || 0),
                 history: Array.isArray(data.history) ? data.history.map(({ amount, ...entry }) => entry) : [],
             });
         });
         await batch.commit();
     }
     await markerRef.set({ completed: true, completedAt: Date.now(), studentsMigrated: users.size, bookingsMigrated: legacyBookings.length });
+}
+
+async function migrateConsumptionDueAt() {
+    const markerRef = window.db.collection("teacherAccounting").doc("consumptionDueMigrationV1");
+    const marker = await markerRef.get();
+    if (marker.exists && marker.data()?.completed === true) return;
+    const bookings = await window.db.collection("bookings").get();
+    const candidates = [];
+    bookings.forEach((doc) => {
+        const data = doc.data() || {};
+        if (Object.prototype.hasOwnProperty.call(data, "consumptionDueAt") && data.consumptionState) return;
+        const status = String(data.status || "booked").toLowerCase();
+        const lateCanceled = status === "canceled" && String(data.canceledBy || "student").toLowerCase() === "student" && Number(data.canceledAt || 0) && Number(data.slot || 0) - Number(data.canceledAt || 0) < STUDENT_CHANGE_CUTOFF_MS;
+        const dueAt = data.balanceChargedAt || data.balanceCharged || data.isFreeTrial === true
+            ? null
+            : lateCanceled ? Number(data.canceledAt) : status !== "canceled" ? getLessonConsumeAfter(data) : null;
+        candidates.push({ ref: doc.ref, dueAt, state: data.balanceChargedAt || data.balanceCharged ? "consumed" : data.isFreeTrial === true ? "not-required" : dueAt ? "pending" : "released" });
+    });
+    for (let offset = 0; offset < candidates.length; offset += 400) {
+        const batch = window.db.batch();
+        candidates.slice(offset, offset + 400).forEach((item) => batch.set(item.ref, { consumptionDueAt: item.dueAt, consumptionState: item.state, consumptionLastError: "", consumptionAttempts: 0 }, { merge: true }));
+        await batch.commit();
+    }
+    await markerRef.set({ completed: true, completedAt: Date.now(), bookingsUpdated: candidates.length });
 }
 
 async function rotateFuturePricingVersions(defaultPrice) {
@@ -6775,6 +6910,92 @@ async function refreshTeacherStudents() {
 }
 
 async function saveStudentFinance(studentId, balance, lessonPrice, accessData = {}) {
+    const userRef = window.db.collection("users").doc(studentId);
+    const accountingRef = window.db.collection("studentAccounting").doc(studentId);
+    const entitlementRef = window.db.collection("studentEntitlements").doc(studentId);
+    const teacherRef = window.db.collection("teachers").doc(state.teacherUser.uid);
+    const now = Date.now();
+    const operationId = String(accessData.operationId || `finance_${studentId}_${now}_${Math.random().toString(36).slice(2, 8)}`);
+    const operationRef = window.db.collection("financeOperations").doc(operationId);
+    const requestedCustomPrice = validPrice(lessonPrice);
+    let paymentApplied = 0;
+    await window.db.runTransaction(async (transaction) => {
+        const [userSnap, accountingSnap, entitlementSnap, teacherSnap, operationSnap] = await Promise.all([
+            transaction.get(userRef), transaction.get(accountingRef), transaction.get(entitlementRef),
+            transaction.get(teacherRef), transaction.get(operationRef),
+        ]);
+        if (operationSnap.exists) return;
+        const userData = userSnap.exists ? (userSnap.data() || {}) : {};
+        const accounting = accountingSnap.exists ? (accountingSnap.data() || {}) : userData;
+        const entitlement = entitlementSnap.exists ? (entitlementSnap.data() || {}) : userData;
+        const oldBalance = toMoneyValue(accounting.balance);
+        const nextBalance = Number.isFinite(Number(accessData.balanceDelta)) ? oldBalance + Number(accessData.balanceDelta) : toMoneyValue(balance);
+        const oldLessons = Math.max(0, Number(entitlement.lessonCredits || 0));
+        const nextLessons = Number.isFinite(Number(accessData.lessonDelta))
+            ? Math.max(0, oldLessons + Number(accessData.lessonDelta))
+            : Number.isFinite(Number(accessData.lessonCredits)) ? Math.max(0, Math.floor(Number(accessData.lessonCredits))) : oldLessons;
+        const oldTotalPaid = Math.max(0, toMoneyValue(accounting.totalPaid));
+        const nextTotalPaid = Number.isFinite(Number(accessData.totalPaidDelta))
+            ? Math.max(0, oldTotalPaid + Number(accessData.totalPaidDelta))
+            : Number.isFinite(Number(accessData.totalPaid)) ? Math.max(0, toMoneyValue(accessData.totalPaid)) : oldTotalPaid;
+        const balanceDelta = nextBalance - oldBalance;
+        const accountingUpdate = {
+            studentUid: studentId, balance: nextBalance, customLessonPrice: requestedCustomPrice,
+            totalPaid: nextTotalPaid, financeUpdatedAt: now,
+        };
+        if (balanceDelta !== 0) {
+            accountingUpdate.transactions = window.firebase.firestore.FieldValue.arrayUnion({
+                id: operationId, at: now, amount: balanceDelta,
+                type: balanceDelta > 0 ? "credit" : "charge",
+                description: (accessData.paymentNote || (balanceDelta > 0 ? "Balance credited" : "Balance adjusted")).slice(0, 300),
+                newBalance: nextBalance,
+            });
+        }
+        const customChanged = validPrice(accounting.customLessonPrice) !== requestedCustomPrice;
+        const needsPricing = customChanged || !entitlement.pricingVersion || entitlement.pricingVersion === "unconfigured";
+        const snapshot = needsPricing ? resolvePriceSnapshot({
+            defaultPrice: validPrice(getConfiguredLessonPrice()), customPrice: requestedCustomPrice,
+            version: `price_${studentId}_${now}`, capturedAt: now,
+        }) : null;
+        transaction.set(userRef, {
+            courseAccess: accessData.courseAccess === true,
+            accessType: accessData.courseAccess ? (accessData.accessType || "lifetime") : "none",
+            accessProduct: accessData.courseAccess ? "palestinian-arabic-starter" : "",
+            paymentStatus: accessData.paymentStatus || "none",
+            paymentNote: (accessData.paymentNote || "").trim().slice(0, 300),
+            courseAccessRequested: accessData.courseAccess ? false : accessData.courseAccessRequested === true,
+            courseAccessUpdatedAt: now,
+            ...(typeof accessData.reviewRequested !== "undefined" ? { reviewRequested: accessData.reviewRequested === true, reviewRequestedAt: accessData.reviewRequested ? now : null } : {}),
+            updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        transaction.set(accountingRef, accountingUpdate, { merge: true });
+        transaction.set(entitlementRef, {
+            studentUid: studentId, lessonCredits: nextLessons,
+            reservedLessonCredits: Math.max(0, Number(entitlement.reservedLessonCredits || 0)),
+            allowOverdraft: accessData.allowOverdraft === true,
+            pricingVersion: snapshot?.version || String(entitlement.pricingVersion || "legacy-unpriced"),
+            entitlementUpdatedAt: now,
+        }, { merge: true });
+        if (snapshot) transaction.set(window.db.collection("pricingSnapshots").doc(snapshot.version), { studentUid: studentId, ...snapshot });
+        transaction.set(operationRef, {
+            id: operationId, studentUid: studentId, type: accessData.adjustmentType || "manual",
+            balanceDelta, lessonDelta: nextLessons - oldLessons, totalPaidDelta: nextTotalPaid - oldTotalPaid,
+            createdAt: now, createdBy: state.teacherUser.uid,
+        });
+        paymentApplied = accessData.adjustmentType === "payment" ? Number(accessData.paymentAmount || 0) : 0;
+        if (paymentApplied) {
+            const teacherData = teacherSnap.exists ? (teacherSnap.data() || {}) : {};
+            transaction.set(teacherRef, {
+                revenueTotal: Number(teacherData.revenueTotal || 210) + paymentApplied,
+                revenueUpdatedAt: now,
+            }, { merge: true });
+        }
+    });
+    if (paymentApplied) state.teacherRevenueTotal = Number(state.teacherRevenueTotal ?? 210) + paymentApplied;
+    updateTeacherOverviewStats();
+}
+
+async function saveStudentFinanceLegacyUnused(studentId, balance, lessonPrice, accessData = {}) {
     const userRef = window.db.collection("users").doc(studentId);
     const accountingRef = window.db.collection("studentAccounting").doc(studentId);
     const entitlementRef = window.db.collection("studentEntitlements").doc(studentId);
@@ -6982,6 +7203,18 @@ async function consumeBookingTransactionally(doc, now, missingPrice) {
 }
 
 async function reconcileStudentBalances() {
+    if (typeof window.runLessonConsumptionNow !== "function") {
+        throw new Error("The server-side lesson consumption worker is unavailable.");
+    }
+    const serverResult = await window.runLessonConsumptionNow();
+    if (!serverResult?.success) throw new Error(serverResult?.message || "Lesson consumption failed.");
+    return {
+        chargedCount: Number(serverResult.consumption?.consumed || 0),
+        missingPriceCount: Number(serverResult.consumption?.failed || 0),
+    };
+}
+
+async function reconcileStudentBalancesLegacyUnused() {
     const now = Date.now();
     const docs = await loadBalanceChargeCandidates(now);
     let chargedCount = 0;
@@ -7876,12 +8109,13 @@ function wireTeacherActions() {
             const student = state.studentCache.get(studentId) || {};
             if (!studentId || amount <= 0) { setStatus(els.teacherStudentsMsg, "Enter an amount greater than zero.", "error"); return; }
             const effectivePrice = validPrice(form?.querySelector("[data-student-price]")?.value) || validPrice(state.defaultLessonPrice);
-            const restoredLessonsRaw = !isPayment && effectivePrice ? amount / effectivePrice : 0;
-            const restoredLessons = Math.round(restoredLessonsRaw);
-            if (!isPayment && (!effectivePrice || restoredLessons < 1 || Math.abs(restoredLessonsRaw - restoredLessons) > 0.0001)) {
+            const restoredLessons = !isPayment ? refundedLessonCount({ amount, effectivePrice }) : 0;
+            if (!isPayment && restoredLessons === null) {
                 setStatus(els.teacherStudentsMsg, `The returned amount must equal a whole number of lessons at ${formatMoney(effectivePrice || 0)} each. You can also set Remaining Lessons directly.`, "error");
                 return;
             }
+            const operationId = balanceActionBtn.dataset.operationId || `finance_${studentId}_${isPayment ? "payment" : "refund"}_${Date.now()}`;
+            balanceActionBtn.dataset.operationId = operationId;
             withButtonLoading(balanceActionBtn, isPayment ? "Adding..." : "Returning...", async () => {
                 await saveStudentFinance(studentId, toMoneyValue(student.balance) + amount, form?.querySelector("[data-student-price]")?.value, {
                     courseAccess: student.courseAccess === true,
@@ -7892,8 +8126,14 @@ function wireTeacherActions() {
                     allowOverdraft: student.allowOverdraft === true,
                     reviewRequested: student.reviewRequested === true,
                     lessonCredits: !isPayment ? Math.max(0, Number(student.lessonCredits || 0)) + restoredLessons : Number(student.lessonCredits || 0),
+                    balanceDelta: amount,
+                    lessonDelta: !isPayment ? restoredLessons : 0,
+                    totalPaidDelta: isPayment ? amount : 0,
+                    paymentAmount: isPayment ? amount : 0,
+                    operationId,
                     adjustmentType: isPayment ? "payment" : "refund",
                 });
+                delete balanceActionBtn.dataset.operationId;
                 await refreshTeacherStudents();
                 setStatus(els.teacherStudentsMsg, `${isPayment ? "Payment added" : `Credit returned and ${restoredLessons} lesson${restoredLessons === 1 ? "" : "s"} restored`}. New balance: ${formatMoney(toMoneyValue(student.balance) + amount)}.`, "success");
             }).catch((error) => setStatus(els.teacherStudentsMsg, error.message || "Could not update balance.", "error"));
@@ -7916,15 +8156,22 @@ function wireTeacherActions() {
             if (!studentId || creditAmount <= 0) return;
             const student = state.studentCache.get(studentId) || {};
             const currentBalance = Number(student.balance || 0);
-            const newBalance = currentBalance + creditAmount;
-            const lessonPrice = getConfiguredLessonPrice();
+            const customLessonPrice = validPrice(student.customLessonPrice);
+            const lessonPrice = customLessonPrice || validPrice(getConfiguredLessonPrice());
+            const creditedLessonValue = isPackageApproval ? packageCreditValue({ lessons: packageLessons, effectivePrice: lessonPrice }) : creditAmount;
+            const newBalance = currentBalance + creditedLessonValue;
 
+            const requestStamp = student.courseAccessRequestedAt?.toMillis?.() || Number(student.courseAccessRequestedAt?.seconds || student.courseAccessRequestedAt || Date.now());
+            const operationId = quickCreditBtn.dataset.operationId || `finance_${studentId}_package_${String(student.requestedPackage || requestedPkg).replace(/[^a-zA-Z0-9_-]/g, "_")}_${requestStamp}`;
+            quickCreditBtn.dataset.operationId = operationId;
             withButtonLoading(quickCreditBtn, "Adding...", async () => {
-                await saveStudentFinance(studentId, newBalance, lessonPrice, {
+                await saveStudentFinance(studentId, newBalance, customLessonPrice || "", {
                     courseAccess: student.courseAccess === true,
                     accessType: student.accessType || "manual",
                     paymentStatus: "approved",
-                    paymentNote: `Added +$${creditAmount} credit (Previous: $${currentBalance})`,
+                    paymentNote: isPackageApproval
+                        ? `Payment ${formatMoney(creditAmount)}; credited ${packageLessons} lessons at ${formatMoney(lessonPrice)}`
+                        : `Added +$${creditAmount} credit (Previous: $${currentBalance})`,
                     courseAccessRequested: false,
                     lessonCredits: isPackageApproval
                         ? (Object.prototype.hasOwnProperty.call(student, "lessonCredits")
@@ -7932,11 +8179,17 @@ function wireTeacherActions() {
                             : Math.max(0, Math.floor(currentBalance / Math.max(lessonPrice, 0.01)))) + packageLessons
                         : Number(student.lessonCredits || 0),
                     totalPaid: isPackageApproval ? Number(student.totalPaid || 0) + creditAmount : Number(student.totalPaid || 0),
+                    balanceDelta: creditedLessonValue,
+                    lessonDelta: isPackageApproval ? packageLessons : 0,
+                    totalPaidDelta: isPackageApproval ? creditAmount : 0,
+                    paymentAmount: creditAmount,
+                    operationId,
                     adjustmentType: "payment",
                 });
+                delete quickCreditBtn.dataset.operationId;
                 await refreshTeacherStudents();
                 setStatus(els.teacherStudentsMsg, isPackageApproval
-                    ? `Confirmed ${packageLessons} lessons and ${formatMoney(creditAmount)} paid for ${student.name || "student"}.`
+                    ? `Confirmed ${packageLessons} lessons, ${formatMoney(creditAmount)} paid, and ${formatMoney(creditedLessonValue)} lesson value for ${student.name || "student"}.`
                     : `Added +$${creditAmount} to ${student.name || "student"}'s balance (New balance: $${newBalance.toFixed(2)}).`, "success");
             }).catch((error) => {
                 setStatus(els.teacherStudentsMsg, error.message || "Could not update balance.", "error");
@@ -7949,7 +8202,7 @@ function wireTeacherActions() {
             const studentId = requestReviewBtn.dataset.studentId;
             if (!studentId) return;
             const student = state.studentCache.get(studentId) || {};
-            const lessonPrice = getConfiguredLessonPrice();
+            const lessonPrice = validPrice(student.customLessonPrice) || "";
             withButtonLoading(requestReviewBtn, "Requesting...", async () => {
                 await saveStudentFinance(studentId, student.balance || 0, lessonPrice, {
                     courseAccess: student.courseAccess === true,
@@ -8410,6 +8663,7 @@ async function handleAuthState(user) {
         await window.db.collection("teacherAccounting").doc("global").set({ defaultLessonPrice: state.defaultLessonPrice, currency: "USD", migratedAt: Date.now() });
     }
     await migrateLegacyFinancialPrivacy();
+    await migrateConsumptionDueAt();
     renderPreplyStatisticsSummary(teacherData.calendarStatistics || {});
     if (els.teacherAppsScriptUrl) els.teacherAppsScriptUrl.value = teacherData.appsScript?.webAppUrl || "";
     if (els.teacherPreplyCalendarId) {
