@@ -59,6 +59,9 @@ function getConfig_() {
   const preplyRaw = getScriptProperty_(props, 'PREPLY_CALENDAR_ID', '');
   const additionalRaw = getScriptProperty_(props, 'ADDITIONAL_CALENDAR_IDS', '');
   const firebaseTeacherEmail = normalizeEmail_(getScriptProperty_(props, 'FIREBASE_TEACHER_EMAIL', 'farouqmurtaja96@gmail.com'));
+  const firebaseTeacherEmails = String(getScriptProperty_(props, 'FIREBASE_TEACHER_EMAILS', 'farouqmurtaja96@gmail.com,farouqmoh@hotmail.com'))
+    .split(',').map(normalizeEmail_).filter(Boolean);
+  if (firebaseTeacherEmail && firebaseTeacherEmails.indexOf(firebaseTeacherEmail) === -1) firebaseTeacherEmails.push(firebaseTeacherEmail);
   const notificationEmail = normalizeEmail_(
     getScriptProperty_(props, 'NOTIFICATION_EMAIL', '') ||
     getDefaultNotificationEmail_() ||
@@ -68,6 +71,7 @@ function getConfig_() {
     firebaseApiKey: getScriptProperty_(props, 'FIREBASE_API_KEY', 'AIzaSyCfhVE4hdR5P7YW6JOAnSC5az7s-J8zEsc'),
     firebaseProjectId: getScriptProperty_(props, 'FIREBASE_PROJECT_ID', 'farouqapp-7ea93'),
     firebaseTeacherEmail: firebaseTeacherEmail,
+    firebaseTeacherEmails: firebaseTeacherEmails,
     primaryCalendarId: getScriptProperty_(props, 'PRIMARY_CALENDAR_ID', 'primary'),
     preplyCalendarId: normalizeCalendarId_(preplyRaw),
     additionalCalendarIds: parseCalendarIds_(additionalRaw),
@@ -379,13 +383,17 @@ function getCallerRoleCheck_(config, caller) {
 
 function requireTeacherCaller_(config, authToken) {
   const caller = verifyFirebaseCaller_(config, authToken);
+  const configuredTeacherEmails = Array.isArray(config.firebaseTeacherEmails)
+    ? config.firebaseTeacherEmails
+    : [config.firebaseTeacherEmail].filter(Boolean);
+  if (configuredTeacherEmails.indexOf(caller.email) !== -1) return caller;
   const roleCheck = getCallerRoleCheck_(config, caller);
   const hasTeacherRole = roleCheck.role === 'teacher';
-  const matchesConfiguredTeacher = !!config.firebaseTeacherEmail && caller.email === config.firebaseTeacherEmail;
+  const matchesConfiguredTeacher = configuredTeacherEmails.indexOf(caller.email) !== -1;
   if (!hasTeacherRole && !matchesConfiguredTeacher) {
     throw new Error(
       'Teacher access required. Signed in as "' + caller.email +
-      '", configured teacher is "' + (config.firebaseTeacherEmail || 'not configured') +
+      '", configured teachers are "' + (configuredTeacherEmails.join(', ') || 'not configured') +
       '", Firestore role is "' + roleCheck.role + '"' +
       (roleCheck.error ? ', role lookup failed: ' + roleCheck.error : '') + '.'
     );

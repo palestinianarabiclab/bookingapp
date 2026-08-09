@@ -5824,7 +5824,7 @@ if (typeof window !== "undefined") {
     });
 }
 
-async function refreshTeacherBookings({ reconcileBalances = true } = {}) {
+async function refreshTeacherBookings({ reconcileBalances = false } = {}) {
     const balanceResult = reconcileBalances
         ? await reconcileStudentBalances()
         : { chargedCount: 0, missingPriceCount: 0 };
@@ -6144,21 +6144,9 @@ async function commitTeacherCalendarMove(dragState, newSlot) {
 }
 
 function startBalanceReconcileAutoRefresh() {
-    if (state.balanceReconcileTimer) return;
-    state.balanceReconcileTimer = window.setInterval(() => {
-        if (!state.teacherUser || state.teacherRole !== "teacher" || document.hidden) return;
-        reconcileStudentBalances()
-            .then(async (result) => {
-                if (result?.chargedCount) {
-                    setStatus(els.teacherStudentsMsg, `Deducted ${result.chargedCount} due lesson charge${result.chargedCount === 1 ? "" : "s"}.`, "success");
-                    await refreshTeacherStudents();
-                    await refreshTeacherBookings({ reconcileBalances: false });
-                } else {
-                    await syncPlatformStatistics();
-                }
-            })
-            .catch(console.error);
-    }, 30 * 60 * 1000);
+    // The durable Apps Script trigger owns lesson consumption. Re-running it
+    // from every open teacher browser caused duplicate reads and quota spikes.
+    stopBalanceReconcileAutoRefresh();
 }
 
 function stopBalanceReconcileAutoRefresh() {
