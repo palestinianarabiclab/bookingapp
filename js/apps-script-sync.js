@@ -24,6 +24,18 @@ const appsScriptUrlCache = {
     expiresAt: 0,
 };
 
+const FIRESTORE_QUOTA_COOLDOWN_MS = 5 * 60 * 1000;
+
+function getFirestoreQuotaCooldownUntil() {
+    return Number(sessionStorage.getItem("farouq_firestore_quota_cooldown_until") || 0);
+}
+
+function rememberFirestoreQuotaFailure(message) {
+    if (/HTTP 429|quota exceeded|resource_exhausted|resource-exhausted/i.test(String(message || ""))) {
+        sessionStorage.setItem("farouq_firestore_quota_cooldown_until", String(Date.now() + FIRESTORE_QUOTA_COOLDOWN_MS));
+    }
+}
+
 function normalizeWebAppUrl(url) {
     return (url || "").trim();
 }
@@ -86,6 +98,10 @@ async function getAppsScriptWebAppUrl() {
 }
 
 async function callAppsScript(action, payload = {}, { allowGet = false } = {}) {
+    const firestoreDependent = !["test", "getBusy", "getTeacherBusy", "getEmailQuota"].includes(action);
+    if (firestoreDependent && Date.now() < getFirestoreQuotaCooldownUntil()) {
+        return { success: false, quotaLimited: true, message: "Firestore quota is temporarily exhausted. Automatic retries are paused for five minutes." };
+    }
     const webAppUrl = await getAppsScriptWebAppUrl();
     if (!webAppUrl) {
         return { success: false, message: "Apps Script Web App URL is not configured." };
@@ -107,7 +123,9 @@ async function callAppsScript(action, payload = {}, { allowGet = false } = {}) {
                 },
             allowGet ? 15000 : 30000
         );
-        return parseAppsScriptResponse(res);
+        const result = await parseAppsScriptResponse(res);
+        rememberFirestoreQuotaFailure(result?.message);
+        return result;
     } catch (err) {
         return { success: false, message: err?.message || String(err) };
     }

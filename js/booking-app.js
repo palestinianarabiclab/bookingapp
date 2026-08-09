@@ -887,25 +887,22 @@ function updateStudentBalanceUi() {
     }
     if (!signedIn) return;
     
-    if (els.studentBalanceValue) {
-        els.studentBalanceValue.textContent = String(getStudentTotalLessonCredits());
-    }
+    const ownedLessons = getStudentTotalLessonCredits();
+    const reservedLessons = Math.max(0, Number(state.studentEntitlement?.reservedLessonCredits || 0));
+    const availableLessons = Math.max(0, ownedLessons - reservedLessons);
+    if (els.studentBalanceValue) els.studentBalanceValue.textContent = String(availableLessons);
     
     if (els.studentLessonPriceValue) {
-        els.studentLessonPriceValue.textContent = `${Number(state.studentEntitlement?.reservedLessonCredits || 0)} reserved`;
+        els.studentLessonPriceValue.textContent = `${reservedLessons} reserved`;
     }
 
     const remainingBadge = document.getElementById("studentRemainingLessonsBadge");
     if (remainingBadge) {
-        const remainingLessons = Math.max(0, getStudentTotalLessonCredits() - Number(state.reservedPaidLessons || 0));
-        if (remainingLessons > 0) {
-            remainingBadge.textContent = `(${remainingLessons} lesson${remainingLessons === 1 ? "" : "s"} remaining)`;
+        if (ownedLessons > 0) {
+            remainingBadge.textContent = `(${ownedLessons} lesson${ownedLessons === 1 ? "" : "s"} owned)`;
             remainingBadge.style.background = "var(--primary)";
-        } else if (remainingLessons < 0) {
-            remainingBadge.textContent = `(Overdue by ${Math.abs(remainingLessons)} lesson${Math.abs(remainingLessons) === 1 ? "" : "s"})`;
-            remainingBadge.style.background = "#ef4444";
         } else {
-            remainingBadge.textContent = `(0 lessons remaining)`;
+            remainingBadge.textContent = `(0 lessons owned)`;
             remainingBadge.style.background = "var(--ink-light)";
         }
     }
