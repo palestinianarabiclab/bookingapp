@@ -2574,7 +2574,10 @@ async function cancelStudentBooking(bookingId) {
             calendarLastSyncedAt: Date.now(),
             calendarSyncLastError: "",
             updatedAt: Date.now(),
-        }, { merge: true });
+        }, { merge: true }).catch((error) => {
+            console.warn("Cancellation succeeded; Calendar metadata will be reconciled later.", error);
+            calendarDeletePending = true;
+        });
     }
     return { calendarDeletePending };
 }
@@ -4258,8 +4261,7 @@ function wireStudentActions() {
                         : "Booking canceled.",
                     "success"
                 );
-                await loadStudentBookings();
-                await renderBookingCalendar();
+                await Promise.allSettled([loadStudentBookings(), renderBookingCalendar()]);
                 return;
             }
             if (action === "reschedule") {
@@ -6282,7 +6284,12 @@ function renderProfileUi() {
             }
         }, 50);
     }
-    if (els.preplyRateDisplay) els.preplyRateDisplay.textContent = p.rateText ? `Regular rate: ${p.rateText}` : "Rate set by teacher";
+    if (els.preplyRateDisplay) {
+        const rateDisplay = String(p.rateText || "").trim();
+        els.preplyRateDisplay.textContent = rateDisplay
+            ? (/^regular rate\s*:/i.test(rateDisplay) ? rateDisplay : `Regular rate: ${rateDisplay}`)
+            : "Rate set by teacher";
+    }
 
     if (els.preplyAvatarContainer) {
         const avatarStr = (p.avatarUrl || "").trim();
@@ -6312,7 +6319,10 @@ function renderProfileUi() {
     }
 
     if (els.teacherProfileNameInput) els.teacherProfileNameInput.value = p.name || "";
-    if (els.teacherProfileRateInput) els.teacherProfileRateInput.value = state.teacherRole === "teacher" && state.defaultLessonPrice ? String(state.defaultLessonPrice) : "";
+    if (els.teacherProfileRateInput) {
+        els.teacherProfileRateInput.value = String(p.rateText || "").trim() ||
+            (state.teacherRole === "teacher" && state.defaultLessonPrice ? `$${state.defaultLessonPrice} / 50 min` : "");
+    }
     if (els.teacherProfileHeadlineInput) els.teacherProfileHeadlineInput.value = p.headline || "";
     if (els.teacherProfileAvatarUrlInput) els.teacherProfileAvatarUrlInput.value = p.avatarUrl || "";
     if (els.teacherProfileVideoUrlInput) els.teacherProfileVideoUrlInput.value = p.videoUrl || "";
@@ -7470,14 +7480,15 @@ function wireTeacherActions() {
         event.preventDefault();
         try {
             await withButtonLoading(els.saveTeacherProfileBtn, "Saving...", async () => {
-                const defaultPriceText = String(els.teacherProfileRateInput?.value || "").replace(/,/g, "").match(/\d+(?:\.\d+)?/);
+                const rateDisplay = String(els.teacherProfileRateInput?.value || "").trim();
+                const defaultPriceText = rateDisplay.replace(/,/g, "").match(/\d+(?:\.\d+)?/);
                 const defaultPrice = validPrice(defaultPriceText?.[0]);
                 if (!defaultPrice) throw new Error("Enter a valid global default lesson price.");
                 const updated = {
                     ...state.profileSettings,
                     name: (els.teacherProfileNameInput?.value || "").trim() || "Farouq Murtaja",
                     headline: (els.teacherProfileHeadlineInput?.value || "").trim(),
-                    rateText: `$${defaultPrice}`,
+                    rateText: rateDisplay,
                     avatarUrl: (els.teacherProfileAvatarUrlInput?.value || "").trim(),
                     videoUrl: (els.teacherProfileVideoUrlInput?.value || "").trim(),
                     hoursTaught: (els.teacherProfileHoursInput?.value || "").trim() || "1,200+",
