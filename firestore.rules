@@ -761,10 +761,11 @@ service cloud.firestore {
         ownsDoc(uid) &&
         request.resource.data.keys().hasOnly(['studentUid', 'lessonCredits', 'reservedLessonCredits', 'allowOverdraft', 'pricingVersion', 'entitlementUpdatedAt']) &&
         request.resource.data.studentUid == uid &&
-        request.resource.data.lessonCredits == 0 &&
-        request.resource.data.reservedLessonCredits == 0 &&
-        request.resource.data.allowOverdraft == false &&
-        request.resource.data.pricingVersion == "unconfigured"
+        request.resource.data.lessonCredits == (get(userDocPath(uid)).data.keys().hasAny(['lessonCredits']) ? get(userDocPath(uid)).data.lessonCredits : 0) &&
+        request.resource.data.reservedLessonCredits == (get(userDocPath(uid)).data.keys().hasAny(['reservedLessonCredits']) ? get(userDocPath(uid)).data.reservedLessonCredits : 0) &&
+        request.resource.data.allowOverdraft == (get(userDocPath(uid)).data.keys().hasAny(['allowOverdraft']) && get(userDocPath(uid)).data.allowOverdraft == true) &&
+        request.resource.data.pricingVersion == (get(userDocPath(uid)).data.keys().hasAny(['pricingVersion']) ? get(userDocPath(uid)).data.pricingVersion : "unconfigured") &&
+        isTimestampNumber(request.resource.data.entitlementUpdatedAt)
       );
       allow update: if isTeacher() || (
         ownsDoc(uid) &&

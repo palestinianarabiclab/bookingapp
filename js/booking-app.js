@@ -781,8 +781,33 @@ async function countReservedPaidLessons(studentUid) {
 }
 
 async function getStudentBillingForBooking(studentUid) {
-    const legacyReserved = await countReservedPaidLessons(studentUid);
-    return { legacyReserved };
+    const userRef = window.db.collection("users").doc(studentUid);
+    const entitlementRef = window.db.collection("studentEntitlements").doc(studentUid);
+    const [userSnap, entitlementSnap] = await Promise.all([userRef.get(), entitlementRef.get()]);
+    if (!userSnap.exists) throw new Error("Student account was not found.");
+    if (!entitlementSnap.exists) {
+        const legacy = userSnap.data() || {};
+        const lessonCredits = Math.max(0, Number(legacy.lessonCredits || 0));
+        const reservedLessonCredits = Math.max(0, Number(legacy.reservedLessonCredits || 0));
+        await entitlementRef.set({
+            studentUid,
+            lessonCredits,
+            reservedLessonCredits,
+            allowOverdraft: legacy.allowOverdraft === true,
+            pricingVersion: String(legacy.pricingVersion || "unconfigured"),
+            entitlementUpdatedAt: Date.now(),
+        });
+        state.studentEntitlement = {
+            studentUid, lessonCredits, reservedLessonCredits,
+            allowOverdraft: legacy.allowOverdraft === true,
+            pricingVersion: String(legacy.pricingVersion || "unconfigured"),
+        };
+    }
+    return {
+        legacyReserved: entitlementSnap.exists
+            ? Math.max(0, Number(entitlementSnap.data()?.reservedLessonCredits || 0))
+            : Math.max(0, Number(userSnap.data()?.reservedLessonCredits || 0)),
+    };
 }
 
 async function commitBookingWithBilling({ bookingRef, bookingData, publicBookingData, billing }) {
@@ -7204,10 +7229,20 @@ async function consumeBookingTransactionally(doc, now, missingPrice) {
 
 async function reconcileStudentBalances() {
     if (typeof window.runLessonConsumptionNow !== "function") {
-        throw new Error("The server-side lesson consumption worker is unavailable.");
+        console.warn("The server-side lesson consumption worker is unavailable; the scheduled worker will retry later.");
+        return { chargedCount: 0, missingPriceCount: 0, deferred: true };
     }
-    const serverResult = await window.runLessonConsumptionNow();
-    if (!serverResult?.success) throw new Error(serverResult?.message || "Lesson consumption failed.");
+    let serverResult;
+    try {
+        serverResult = await window.runLessonConsumptionNow();
+    } catch (error) {
+        console.warn("Immediate lesson consumption check failed; the scheduled worker will retry later.", error);
+        return { chargedCount: 0, missingPriceCount: 0, deferred: true };
+    }
+    if (!serverResult?.success) {
+        console.warn("Immediate lesson consumption check was deferred:", serverResult?.message || "Lesson consumption failed.");
+        return { chargedCount: 0, missingPriceCount: 0, deferred: true };
+    }
     return {
         chargedCount: Number(serverResult.consumption?.consumed || 0),
         missingPriceCount: Number(serverResult.consumption?.failed || 0),
