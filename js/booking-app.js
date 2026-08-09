@@ -6769,6 +6769,31 @@ async function migrateConsumptionDueAt() {
     await markerRef.set({ completed: true, completedAt: Date.now(), bookingsUpdated: candidates.length });
 }
 
+async function normalizeCanceledFreeTrialConsumption() {
+    const markerRef = window.db.collection("teacherAccounting").doc("canceledFreeTrialConsumptionV1");
+    const marker = await markerRef.get();
+    if (marker.exists && marker.data()?.completed === true) return;
+    const snapshot = await window.db.collection("bookings").where("isFreeTrial", "==", true).get();
+    const candidates = snapshot.docs.filter((doc) => {
+        const booking = doc.data() || {};
+        return String(booking.status || "").toLowerCase() === "canceled" &&
+            (booking.consumptionState !== "not-required" || booking.consumptionDueAt != null || booking.consumptionLastError);
+    });
+    for (let offset = 0; offset < candidates.length; offset += 400) {
+        const batch = window.db.batch();
+        candidates.slice(offset, offset + 400).forEach((doc) => batch.set(doc.ref, {
+            consumptionDueAt: null,
+            consumptionState: "not-required",
+            consumptionLastError: "",
+            consumptionAttempts: 0,
+            reservationStatus: "not-required",
+            updatedAt: Date.now(),
+        }, { merge: true }));
+        await batch.commit();
+    }
+    await markerRef.set({ completed: true, completedAt: Date.now(), bookingsUpdated: candidates.length });
+}
+
 async function rotateFuturePricingVersions(defaultPrice) {
     const [accountingSnap, entitlementSnap] = await Promise.all([
         window.db.collection("studentAccounting").get(),
@@ -8735,6 +8760,7 @@ async function handleAuthState(user) {
     }
     await migrateLegacyFinancialPrivacy();
     await migrateConsumptionDueAt();
+    await normalizeCanceledFreeTrialConsumption();
     renderPreplyStatisticsSummary(teacherData.calendarStatistics || {});
     if (els.teacherAppsScriptUrl) els.teacherAppsScriptUrl.value = teacherData.appsScript?.webAppUrl || "";
     if (els.teacherPreplyCalendarId) {
