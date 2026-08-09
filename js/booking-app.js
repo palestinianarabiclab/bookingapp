@@ -4620,6 +4620,17 @@ function wireStudentActions() {
             isLocalDevHost,
         }));
         await loadStudentBookings();
+        } catch (error) {
+            console.error("Student booking submission failed.", error);
+            const permissionDenied = ["permission-denied", "firestore/permission-denied"]
+                .includes(error?.code) || /missing or insufficient permissions/i.test(String(error?.message || ""));
+            setStatus(
+                els.bookingMsg,
+                permissionDenied
+                    ? "Booking permissions are updating. Please refresh the page and try again."
+                    : (error?.message || "Booking failed. Please try again."),
+                "error"
+            );
         } finally {
             state.bookingSubmissionInFlight = false;
             updateBookingSubmitState();

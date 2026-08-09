@@ -468,6 +468,12 @@ service cloud.firestore {
     }
 
     match /bookings/{docId} {
+      // A student booking uses a deterministic document ID for retry safety. The
+      // client must be able to check its own ID before the document exists, but
+      // must not gain access to another student's booking.
+      allow get: if signedIn() &&
+        docId.matches('^student_' + request.auth.uid + '_[0-9]+(_after_[0-9]+)?$');
+
       allow create: if request.resource.data.keys().hasOnly([
           'slot',
           'durationMinutes',
