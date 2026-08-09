@@ -33,6 +33,11 @@ export function makeBookingOperationId(studentUid, slot, generation = "") {
     return `student_${safeUid}_${safeSlot}${safeGeneration ? `_${safeGeneration}` : ""}`;
 }
 
+export function isFreeTrialEligible(profile = {}, bookings = []) {
+    if (profile.trialUsed === true) return false;
+    return !bookings.some((booking) => booking?.isFreeTrial === true || Boolean(booking));
+}
+
 export function getLessonConsumeAfter(booking = {}) {
     const slot = Number(booking.slot || 0);
     const duration = Math.max(15, Number(booking.durationMinutes || booking.slotMinutes || 50));

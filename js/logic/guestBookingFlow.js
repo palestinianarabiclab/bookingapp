@@ -410,8 +410,12 @@ export async function submitGuestBooking({
         console.error("Booking failed with error:", err);
         const permissionDenied = ["permission-denied", "firestore/permission-denied"]
             .includes(err?.code);
+        const quotaExceeded = ["resource-exhausted", "firestore/resource-exhausted"]
+            .includes(err?.code) || /quota exceeded|resource-exhausted/i.test(String(err?.message || ""));
         if (bookingMsg) {
-            bookingMsg.textContent = permissionDenied
+            bookingMsg.textContent = quotaExceeded
+                ? "The booking service is temporarily busy. No new booking was confirmed. Please wait 30 seconds and try once."
+                : permissionDenied
                 ? "Firestore rejected the booking before confirmation. No booking email was sent. Please refresh, sign in again, and retry."
                 : "Booking failed. Please try again.";
         }

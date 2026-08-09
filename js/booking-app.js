@@ -18,6 +18,7 @@ import {
     getLegacyLessonCredits,
     getLessonConsumeAfter,
     isConsumptionEligible,
+    isFreeTrialEligible,
     isLessonHistorical,
     makeBookingOperationId,
 } from "./logic/bookingBalance.js?v=20260808-phase1-balance-v1";
@@ -114,6 +115,7 @@ const state = {
     busyRefreshTimer: null,
     teacherBusyRefreshTimer: null,
     teacherBookingsUnsubscribe: null,
+    teacherBookingsFingerprint: "",
     teacherBookingsRefreshTimer: null,
     studentBookingsRefreshTimer: null,
     balanceReconcileTimer: null,
@@ -859,6 +861,11 @@ async function commitBookingWithBilling({ bookingRef, bookingData, publicBooking
                 bookingId: bookingRef.id,
                 createdAt: Date.now(),
             });
+            transaction.set(userRef, {
+                trialUsed: true,
+                trialUsedAt: bookingData.createdAt,
+                updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true });
         } else {
             const currentReserved = Number.isFinite(Number(profile.reservedLessonCredits))
                 ? Math.max(0, Number(profile.reservedLessonCredits))
@@ -1355,6 +1362,7 @@ function startTeacherCalendarAutoRefresh() {
 function stopTeacherBookingsListener() {
     if (typeof state.teacherBookingsUnsubscribe === "function") state.teacherBookingsUnsubscribe();
     state.teacherBookingsUnsubscribe = null;
+    state.teacherBookingsFingerprint = "";
     if (state.teacherBookingsRefreshTimer) window.clearTimeout(state.teacherBookingsRefreshTimer);
     state.teacherBookingsRefreshTimer = null;
 }
@@ -1364,11 +1372,18 @@ function startTeacherBookingsListener() {
     if (!window.db || !state.teacherUser || state.teacherRole !== "teacher") return;
     const historyStart = Date.now() - 60 * 24 * 60 * 60 * 1000;
     state.teacherBookingsUnsubscribe = window.db.collection("bookings").where("slot", ">=", historyStart)
-        .onSnapshot(() => {
+        .onSnapshot((snapshot) => {
+            const fingerprint = snapshot.docs.map((doc) => {
+                const booking = doc.data() || {};
+                return [doc.id, booking.status, booking.slot, booking.durationMinutes, booking.meetingUrl,
+                    booking.studentNotice, booking.reservationStatus, booking.consumptionState].join("|");
+            }).sort().join("::");
+            if (fingerprint === state.teacherBookingsFingerprint) return;
+            state.teacherBookingsFingerprint = fingerprint;
             if (state.teacherBookingsRefreshTimer) window.clearTimeout(state.teacherBookingsRefreshTimer);
             state.teacherBookingsRefreshTimer = window.setTimeout(() => {
                 state.teacherBookingsRefreshTimer = null;
-                refreshTeacherBookings().catch(console.error);
+                refreshTeacherBookings({ reconcileBalances: false }).catch(console.error);
             }, 300);
         }, (error) => console.warn("Teacher booking live refresh failed.", error));
 }
@@ -4503,8 +4518,8 @@ function wireStudentActions() {
         });
     });
 
-    async function hasPriorStudentBooking(studentUid, email) {
-        if (!window.db || !studentUid) return false;
+    async function getStudentBookingHistoryState(studentUid, email) {
+        if (!window.db || !studentUid) return { hasAnyBooking: false, hasActiveBooking: false, hasEverTrial: false };
         const bookings = new Map();
         const uidSnap = await window.db
             .collection("bookings")
@@ -4521,9 +4536,12 @@ function wireStudentActions() {
                 .get();
             emailSnap.forEach((doc) => bookings.set(doc.id, doc.data() || {}));
         }
-        return Array.from(bookings.values()).some((booking) => {
-            return String(booking.status || "booked").toLowerCase() !== "canceled";
-        });
+        const rows = Array.from(bookings.values());
+        return {
+            hasAnyBooking: rows.length > 0,
+            hasActiveBooking: rows.some((booking) => String(booking.status || "booked").toLowerCase() !== "canceled"),
+            hasEverTrial: rows.some((booking) => booking.isFreeTrial === true),
+        };
     }
 
     els.bookingForm?.addEventListener("submit", async (event) => {
@@ -4543,11 +4561,14 @@ function wireStudentActions() {
         const profile = state.studentProfile || {};
         try {
         const email = (state.currentUser.email || "").trim().toLowerCase();
-        const hasPriorBooking = profile.trialUsed === true
-            ? true
-            : await hasPriorStudentBooking(state.currentUser.uid, email);
-        const isTrial = !hasPriorBooking;
-        if (hasPriorBooking && profile.trialUsed !== true) {
+        const bookingHistory = await getStudentBookingHistoryState(state.currentUser.uid, email);
+        const hasPriorBooking = bookingHistory.hasAnyBooking;
+        const trialAlreadyUsed = profile.trialUsed === true || bookingHistory.hasEverTrial;
+        const isTrial = isFreeTrialEligible(
+            { trialUsed: trialAlreadyUsed },
+            hasPriorBooking ? [{ isFreeTrial: bookingHistory.hasEverTrial }] : []
+        );
+        if (trialAlreadyUsed && profile.trialUsed !== true) {
             const trialUsedAt = Date.now();
             await window.db.collection("users").doc(state.currentUser.uid).set({
                 trialUsed: true,
@@ -5803,8 +5824,10 @@ if (typeof window !== "undefined") {
     });
 }
 
-async function refreshTeacherBookings() {
-    const balanceResult = await reconcileStudentBalances();
+async function refreshTeacherBookings({ reconcileBalances = true } = {}) {
+    const balanceResult = reconcileBalances
+        ? await reconcileStudentBalances()
+        : { chargedCount: 0, missingPriceCount: 0 };
     if (balanceResult.chargedCount && els.teacherStudentsMsg) {
         setStatus(els.teacherStudentsMsg, `Deducted ${balanceResult.chargedCount} due lesson charge${balanceResult.chargedCount === 1 ? "" : "s"}.`, "success");
         await refreshTeacherStudents();
@@ -6129,7 +6152,7 @@ function startBalanceReconcileAutoRefresh() {
                 if (result?.chargedCount) {
                     setStatus(els.teacherStudentsMsg, `Deducted ${result.chargedCount} due lesson charge${result.chargedCount === 1 ? "" : "s"}.`, "success");
                     await refreshTeacherStudents();
-                    await refreshTeacherBookings();
+                    await refreshTeacherBookings({ reconcileBalances: false });
                 } else {
                     await syncPlatformStatistics();
                 }

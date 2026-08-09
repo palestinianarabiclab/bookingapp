@@ -7,9 +7,15 @@ import {
     getLegacyLessonCredits,
     getLessonConsumeAfter,
     isConsumptionEligible,
+    isFreeTrialEligible,
     isLessonHistorical,
     makeBookingOperationId,
 } from "../js/logic/bookingBalance.js";
+
+test("a canceled free trial is still a used one-time trial", () => {
+    assert.equal(isFreeTrialEligible({ trialUsed: false }, [{ isFreeTrial: true, status: "canceled" }]), false);
+    assert.equal(isFreeTrialEligible({ trialUsed: false }, []), true);
+});
 
 test("legacy money-only students retain their lesson entitlement", () => {
     assert.equal(getLegacyLessonCredits({ balance: 75 }, 15), 5);
