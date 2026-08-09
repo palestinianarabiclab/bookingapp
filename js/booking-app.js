@@ -107,6 +107,7 @@ const state = {
     teacherCalendarResize: null,
     teacherCalendarTouch: null,
     studentBookingsUnsubscribe: null,
+    studentBookingsFingerprint: "",
     teacherRevenueTotal: 210,
     studentCache: new Map(),
     googleCalendarMessage: "",
@@ -2466,6 +2467,7 @@ function stopStudentBookingsListener() {
         state.studentBookingsUnsubscribe();
     }
     state.studentBookingsUnsubscribe = null;
+    state.studentBookingsFingerprint = "";
     if (state.studentBookingsRefreshTimer) window.clearTimeout(state.studentBookingsRefreshTimer);
     state.studentBookingsRefreshTimer = null;
 }
@@ -2474,7 +2476,14 @@ function startStudentBookingsListener() {
     stopStudentBookingsListener();
     if (!window.db || !state.currentUser || state.currentRole !== "student") return;
     state.studentBookingsUnsubscribe = window.db.collection("bookings").where("studentUid", "==", state.currentUser.uid)
-        .onSnapshot(() => {
+        .onSnapshot((snapshot) => {
+            const fingerprint = snapshot.docs.map((doc) => {
+                const booking = doc.data() || {};
+                return [doc.id, booking.status, booking.slot, booking.durationMinutes, booking.meetingUrl,
+                    booking.studentNotice, booking.consumptionState, booking.reservationStatus].join("|");
+            }).sort().join("::");
+            if (fingerprint === state.studentBookingsFingerprint) return;
+            state.studentBookingsFingerprint = fingerprint;
             if (state.studentBookingsRefreshTimer) window.clearTimeout(state.studentBookingsRefreshTimer);
             state.studentBookingsRefreshTimer = window.setTimeout(() => {
                 state.studentBookingsRefreshTimer = null;
@@ -2485,13 +2494,12 @@ function startStudentBookingsListener() {
 
 async function cancelStudentBooking(bookingId) {
     const bookingRef = window.db.collection("bookings").doc(bookingId);
-    const userRef = window.db.collection("users").doc(state.currentUser.uid);
     const entitlementRef = window.db.collection("studentEntitlements").doc(state.currentUser.uid);
     let booking = {};
     let alreadyCanceled = false;
     const canceledAt = Date.now();
     await window.db.runTransaction(async (transaction) => {
-        const [snap, userSnap, entitlementSnap] = await Promise.all([transaction.get(bookingRef), transaction.get(userRef), transaction.get(entitlementRef)]);
+        const [snap, entitlementSnap] = await Promise.all([transaction.get(bookingRef), transaction.get(entitlementRef)]);
         if (!snap.exists) throw new Error("Booking was not found.");
         booking = snap.data() || {};
         if (booking.studentUid !== state.currentUser?.uid) throw new Error("This booking does not belong to your account.");
@@ -2520,18 +2528,24 @@ async function cancelStudentBooking(bookingId) {
         }, { merge: true });
         getBookingSlotClaimIds(booking.slot, booking.durationMinutes || booking.slotMinutes || 50)
             .forEach((id) => transaction.delete(window.db.collection("bookingSlotClaims").doc(id)));
-        const cancelJob = createNotificationJob({ bookingId, notificationType: "student-cancellation", recipientType: "teacher", recipientEmail: state.contactSettings?.email || "", version: notificationVersion, createdAt: canceledAt, createdBy: "student", deferInvalid: true });
-        transaction.set(window.db.collection("notificationJobs").doc(cancelJob.id), cancelJob);
+        const cancelJobs = [
+            createNotificationJob({ bookingId, notificationType: "student-cancellation", recipientType: "teacher", recipientEmail: state.contactSettings?.email || "", version: notificationVersion, createdAt: canceledAt, createdBy: "student", deferInvalid: true }),
+            createNotificationJob({ bookingId, notificationType: "student-cancellation", recipientType: "student", recipientEmail: booking.email || state.currentUser?.email || "", version: notificationVersion, createdAt: canceledAt, createdBy: "student" }),
+        ];
+        cancelJobs.forEach((job) => transaction.set(window.db.collection("notificationJobs").doc(job.id), job));
+        transaction.set(bookingRef, {
+            studentNotificationStatus: cancelJobs[1].state,
+            studentNotificationAttempts: 0,
+            studentNotificationLastError: cancelJobs[1].lastError,
+        }, { merge: true });
         const releasablePaidReservation = booking.isFreeTrial !== true && !booking.balanceChargedAt && !booking.balanceCharged &&
             !["released", "consumed", "not-required"].includes(String(booking.reservationStatus || ""));
         if (!isLateCancel && releasablePaidReservation && entitlementSnap.exists) {
             const current = Math.max(0, Number(entitlementSnap.data()?.reservedLessonCredits || 0));
             transaction.set(entitlementRef, { reservedLessonCredits: Math.max(0, current - 1), entitlementUpdatedAt: canceledAt }, { merge: true });
         }
-        if (booking.isFreeTrial === true) {
-            transaction.set(userRef, { trialUsed: false, trialUsedAt: window.firebase.firestore.FieldValue.delete(), updatedAt: window.firebase.firestore.FieldValue.serverTimestamp() }, { merge: true });
-            transaction.delete(window.db.collection("trialClaims").doc(booking.studentUid));
-        }
+        // A free trial is a one-time entitlement. Canceling it must not make the
+        // next booking look like a brand-new free-trial booking again.
     });
     if (alreadyCanceled) return { calendarDeletePending: booking.calendarDeletePending === true };
     let calendarDeletePending = true;
@@ -5792,8 +5806,8 @@ async function refreshTeacherBookings() {
     if (balanceResult.chargedCount && els.teacherStudentsMsg) {
         setStatus(els.teacherStudentsMsg, `Deducted ${balanceResult.chargedCount} due lesson charge${balanceResult.chargedCount === 1 ? "" : "s"}.`, "success");
         await refreshTeacherStudents();
-    } else if (balanceResult.missingPriceCount && els.teacherStudentsMsg) {
-        setStatus(els.teacherStudentsMsg, "Some due lessons were not deducted because lesson price is not set.", "error");
+    } else if (balanceResult.missingPriceCount) {
+        console.warn("A legacy due lesson has no historical price snapshot. No amount was guessed or deducted; review it in View Lessons.");
     }
     state.bookingCache = await renderTeacherBookings({
         db: window.db,
@@ -7456,11 +7470,14 @@ function wireTeacherActions() {
         event.preventDefault();
         try {
             await withButtonLoading(els.saveTeacherProfileBtn, "Saving...", async () => {
+                const defaultPriceText = String(els.teacherProfileRateInput?.value || "").replace(/,/g, "").match(/\d+(?:\.\d+)?/);
+                const defaultPrice = validPrice(defaultPriceText?.[0]);
+                if (!defaultPrice) throw new Error("Enter a valid global default lesson price.");
                 const updated = {
                     ...state.profileSettings,
                     name: (els.teacherProfileNameInput?.value || "").trim() || "Farouq Murtaja",
                     headline: (els.teacherProfileHeadlineInput?.value || "").trim(),
-                    rateText: "",
+                    rateText: `$${defaultPrice}`,
                     avatarUrl: (els.teacherProfileAvatarUrlInput?.value || "").trim(),
                     videoUrl: (els.teacherProfileVideoUrlInput?.value || "").trim(),
                     hoursTaught: (els.teacherProfileHoursInput?.value || "").trim() || "1,200+",
@@ -7469,15 +7486,12 @@ function wireTeacherActions() {
                     bioText: (els.teacherProfileBioInput?.value || "").trim(),
                 };
                 state.profileSettings = updated;
-                const defaultPriceText = String(els.teacherProfileRateInput?.value || "").replace(/,/g, "").match(/\d+(?:\.\d+)?/);
-                const defaultPrice = validPrice(defaultPriceText?.[0]);
-                if (!defaultPrice) throw new Error("Enter a valid global default lesson price.");
                 state.defaultLessonPrice = defaultPrice;
                 saveLocalProfileSettings("teacher_profile_v1", updated);
                 await Promise.all([
                     saveCloudProfileSettings(window.db, updated),
                     window.db.collection("teacherAccounting").doc("global").set({ defaultLessonPrice: defaultPrice, currency: "USD", updatedAt: Date.now() }, { merge: true }),
-                    window.db.collection("teacherProfile").doc("primary").update({ rateText: window.firebase.firestore.FieldValue.delete() }),
+                    window.db.collection("bookingSettings").doc("primary").set({ sitePrice: defaultPrice, updatedAt: Date.now() }, { merge: true }),
                 ]);
                 await rotateFuturePricingVersions(defaultPrice);
                 renderProfileUi();

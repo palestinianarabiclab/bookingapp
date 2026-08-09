@@ -1201,6 +1201,7 @@ function processOneNotificationJob_(config, jobDoc) {
     else if (notificationType === 'reschedule' && recipientType === 'teacher') sendTeacherScheduleUpdateEmail_(recipientEmail, details);
     else if (notificationType === 'reschedule' && recipientType === 'student') sendStudentScheduleUpdateEmail_(recipientEmail, details);
     else if (notificationType === 'student-cancellation' && recipientType === 'teacher') sendBookingCancellationEmail_(recipientEmail, Object.assign({}, details, { canceledBy: 'Student' }));
+    else if (notificationType === 'student-cancellation' && recipientType === 'student') sendStudentCancellationConfirmationEmail_(recipientEmail, details);
     else if ((notificationType === 'teacher-cancellation' || notificationType === 'external-cancellation') && recipientType === 'student') sendStudentCancellationConfirmationEmail_(recipientEmail, details);
     else throw new Error('Unsupported notification job type.');
     const sentAt = Date.now();
@@ -1728,12 +1729,19 @@ function handleRequest_(e) {
           if (!existingMeetingUrl) {
             recoveredMeeting = ensureBookingMeetingLink_(config, bookingId, slot);
           }
-          firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), {
-            googleCalendarEventId: recoveredMeeting.eventId || existingEvent.getId(), meetingUrl: recoveredMeeting.meetingUrl || '',
-            calendarSynced: true, calendarSyncState: 'synced', calendarLastSyncedAt: Date.now()
-          });
-          processPendingNotificationJobs_(config, bookingId);
-          const notifiedBooking = firestoreAdminFetch_(config, '/bookings/' + encodeURIComponent(bookingId), { method: 'get' });
+          let recoveryWarning = '';
+          let notifiedBooking = null;
+          try {
+            firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), {
+              googleCalendarEventId: recoveredMeeting.eventId || existingEvent.getId(), meetingUrl: recoveredMeeting.meetingUrl || '',
+              calendarSynced: true, calendarSyncState: 'synced', calendarLastSyncedAt: Date.now()
+            });
+            processPendingNotificationJobs_(config, bookingId);
+            notifiedBooking = firestoreAdminFetch_(config, '/bookings/' + encodeURIComponent(bookingId), { method: 'get' });
+          } catch (postCalendarErr) {
+            recoveryWarning = postCalendarErr && postCalendarErr.message ? postCalendarErr.message : String(postCalendarErr);
+            console.warn('Calendar event recovered, but the server-side Firestore follow-up was deferred: ' + recoveryWarning);
+          }
           return jsonOut({
             success: true,
             message: recoveredMeeting.meetingUrl
@@ -1742,8 +1750,10 @@ function handleRequest_(e) {
             eventId: recoveredMeeting.eventId || existingEvent.getId(),
             meetingUrl: recoveredMeeting.meetingUrl || '',
             calendarInviteSent: false,
-            notificationSent: fsString_(notifiedBooking, 'teacherNotificationStatus') === 'sent',
-            studentConfirmationSent: fsString_(notifiedBooking, 'studentNotificationStatus') === 'sent',
+            notificationSent: notifiedBooking ? fsString_(notifiedBooking, 'teacherNotificationStatus') === 'sent' : false,
+            studentConfirmationSent: notifiedBooking ? fsString_(notifiedBooking, 'studentNotificationStatus') === 'sent' : false,
+            followUpPending: !!recoveryWarning,
+            followUpError: recoveryWarning,
           });
         }
         const hasConflict = bookingAccess.role === 'teacher'
@@ -1770,16 +1780,23 @@ function handleRequest_(e) {
         (((event.conferenceData || {}).entryPoints || []).filter(function (entry) {
           return entry.entryPointType === 'video';
         })[0] || {}).uri || '';
-      firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), {
-        googleCalendarEventId: event.iCalUID || event.id, meetingUrl: meetingUrl,
-        calendarSynced: true, calendarSyncState: 'synced', calendarLastSyncedAt: Date.now()
-      });
-      processPendingNotificationJobs_(config, bookingId);
-      const notifiedBooking = firestoreAdminFetch_(config, '/bookings/' + encodeURIComponent(bookingId), { method: 'get' });
-      var notificationSent = fsString_(notifiedBooking, 'teacherNotificationStatus') === 'sent';
-      var studentConfirmationSent = fsString_(notifiedBooking, 'studentNotificationStatus') === 'sent';
-      var notificationError = fsString_(notifiedBooking, 'teacherNotificationLastError');
-      var studentConfirmationError = fsString_(notifiedBooking, 'studentNotificationLastError');
+      var followUpError = '';
+      var notifiedBooking = null;
+      try {
+        firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), {
+          googleCalendarEventId: event.iCalUID || event.id, meetingUrl: meetingUrl,
+          calendarSynced: true, calendarSyncState: 'synced', calendarLastSyncedAt: Date.now()
+        });
+        processPendingNotificationJobs_(config, bookingId);
+        notifiedBooking = firestoreAdminFetch_(config, '/bookings/' + encodeURIComponent(bookingId), { method: 'get' });
+      } catch (postCalendarErr) {
+        followUpError = postCalendarErr && postCalendarErr.message ? postCalendarErr.message : String(postCalendarErr);
+        console.warn('Calendar event created, but the server-side Firestore follow-up was deferred: ' + followUpError);
+      }
+      var notificationSent = notifiedBooking ? fsString_(notifiedBooking, 'teacherNotificationStatus') === 'sent' : false;
+      var studentConfirmationSent = notifiedBooking ? fsString_(notifiedBooking, 'studentNotificationStatus') === 'sent' : false;
+      var notificationError = notifiedBooking ? fsString_(notifiedBooking, 'teacherNotificationLastError') : '';
+      var studentConfirmationError = notifiedBooking ? fsString_(notifiedBooking, 'studentNotificationLastError') : '';
       return jsonOut({
         success: true,
         message: 'Booking added to Google Calendar.',
@@ -1791,6 +1808,8 @@ function handleRequest_(e) {
         studentConfirmationSent: studentConfirmationSent,
         notificationError: notificationError,
         studentConfirmationError: studentConfirmationError,
+        followUpPending: !!followUpError,
+        followUpError: followUpError,
       });
     }
 

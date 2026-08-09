@@ -73,6 +73,15 @@ test("cancellation types distinguish student teacher and external actions", () =
     assert.equal(new Set([student, teacher, external]).size, 3);
 });
 
+test("student cancellation has deterministic jobs for both recipients", () => {
+    const teacher = createNotificationJob({ bookingId: "b-cancel", notificationType: "student-cancellation", recipientType: "teacher", recipientEmail: "teacher@example.com", version: 2 });
+    const student = createNotificationJob({ bookingId: "b-cancel", notificationType: "student-cancellation", recipientType: "student", recipientEmail: "student@example.com", version: 2 });
+    assert.notEqual(teacher.id, student.id);
+    assert.equal(teacher.state, "pending");
+    assert.equal(student.state, "pending");
+    assert.equal(student.id, notificationJobId("b-cancel", "student-cancellation", "student", 2));
+});
+
 test("teacher-created lesson has one deterministic student notification", () => {
     assert.equal(notificationJobId("b1", "teacher-created", "student", 0), notificationJobId("b1", "teacher-created", "student", 0));
 });
