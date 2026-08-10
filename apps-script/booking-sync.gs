@@ -1358,8 +1358,8 @@ function deleteCalendarEventForFirestoreBooking_(config, doc) {
 function reconcilePlatformCalendarEvents_(config) {
   const cal = CalendarApp.getCalendarById(config.primaryCalendarId);
   if (!cal) throw new Error('Primary calendar not found.');
-  const start = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
-  const end = new Date(Date.now() + 366 * 24 * 60 * 60 * 1000);
+  const start = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const end = new Date(Date.now() + 120 * 24 * 60 * 60 * 1000);
   const events = cal.getEvents(start, end);
   const byBookingId = {};
   events.forEach(function (event) {
@@ -1380,6 +1380,9 @@ function reconcilePlatformCalendarEvents_(config) {
     let meetingUrl = '';
     try { meetingUrl = event.getHangoutLink() || ''; } catch (err) {}
     const changed = oldSlot !== newSlot || oldDuration !== newDuration || (meetingUrl && meetingUrl !== fsString_(doc, 'meetingUrl'));
+    if (!changed && matches.length === 1) return;
+    if (!changed && matches.length > 1 && fsString_(doc, 'calendarSyncState') === 'failed' &&
+        /duplicate calendar events/i.test(fsString_(doc, 'calendarSyncLastError'))) return;
     const values = {
       calendarLastCheckedAt: Date.now(), googleCalendarEventId: event.getId(),
       calendarSyncState: matches.length > 1 ? 'failed' : (changed ? 'externally-modified' : 'synced'),
@@ -1416,8 +1419,8 @@ function reconcilePlatformCalendarEvents_(config) {
   });
   const syncedBookingMap = {};
   const reconciliationStart = Date.now() - 24 * 60 * 60 * 1000;
-  const reconciliationEnd = Date.now() + 366 * 24 * 60 * 60 * 1000;
-  const reconciliationWindow = 60 * 24 * 60 * 60 * 1000;
+  const reconciliationEnd = Date.now() + 120 * 24 * 60 * 60 * 1000;
+  const reconciliationWindow = 30 * 24 * 60 * 60 * 1000;
   for (var windowStart = reconciliationStart; windowStart < reconciliationEnd; windowStart += reconciliationWindow) {
     queryBookingsAdmin_(config, [
       { field: 'slot', op: 'GREATER_THAN_OR_EQUAL', value: windowStart },
@@ -1477,8 +1480,8 @@ function installCalendarSyncTrigger() {
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
     if (trigger.getHandlerFunction() === 'processCalendarSynchronization') ScriptApp.deleteTrigger(trigger);
   });
-  ScriptApp.newTrigger('processCalendarSynchronization').timeBased().everyMinutes(5).create();
-  return { success: true, message: 'Automatic Calendar synchronization installed (every 5 minutes).' };
+  ScriptApp.newTrigger('processCalendarSynchronization').timeBased().everyMinutes(10).create();
+  return { success: true, message: 'Automatic Calendar synchronization installed (every 10 minutes).' };
 }
 
 function doGet(e) {

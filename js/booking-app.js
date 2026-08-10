@@ -117,6 +117,7 @@ const state = {
     teacherBookingsUnsubscribe: null,
     teacherBookingsFingerprint: "",
     teacherBookingsRefreshTimer: null,
+    teacherStudentsLastRefreshAt: 0,
     studentBookingsRefreshTimer: null,
     balanceReconcileTimer: null,
     studentProfileUnsubscribe: null,
@@ -1324,6 +1325,7 @@ async function refreshGoogleBusyAndCalendar({ silent = true } = {}) {
 function startGoogleBusyAutoRefresh() {
     if (state.busyRefreshTimer) return;
     state.busyRefreshTimer = window.setInterval(() => {
+        if (document.hidden) return;
         const studentScreen = document.getElementById("student-screen");
         if (!studentScreen?.classList.contains("app-screen--active")) return;
         ensureBookingCalendarLoaded({ force: true }).catch(console.error);
@@ -5292,7 +5294,6 @@ async function refreshTeacherDashboard() {
     }
     await refreshRuntimeBusyBlocks();
     syncTeacherFormFields();
-    await refreshTeacherStudents();
     await refreshTeacherBookings();
     await refreshGoogleCalendarStatus();
     await renderBookingCalendar();
@@ -5326,6 +5327,9 @@ function switchTeacherTab(tabId) {
     state.activeTeacherTab = tabId;
     if (tabId === "tab-schedule") {
         refreshTeacherCalendarAutomatically({ force: true }).catch(console.error);
+    }
+    if (tabId === "tab-students" && Date.now() - state.teacherStudentsLastRefreshAt >= 30000) {
+        refreshTeacherStudents().catch((error) => console.warn("Could not refresh students.", error));
     }
 }
 
@@ -5618,19 +5622,22 @@ async function syncPreplyStatistics() {
     if (!state.teacherUser || state.teacherRole !== "teacher") {
         throw new Error("Teacher login is required.");
     }
-    const result = await window.getPreplyStatisticsViaAppsScript?.({ days: 730 });
-    if (!result?.success) {
-        throw new Error(result?.message || "Could not load Preply calendar statistics.");
-    }
     const teacherRef = window.db.collection("teachers").doc(state.teacherUser.uid);
     const teacherSnap = await teacherRef.get();
     const teacherData = teacherSnap.exists ? (teacherSnap.data() || {}) : {};
     const previous = teacherData.calendarStatistics || {};
+    const firstSync = previous.initialized !== true;
+    const lastSyncedAt = Number(previous.lastSyncedAt || 0);
+    const elapsedDays = lastSyncedAt > 0 ? Math.ceil((Date.now() - lastSyncedAt) / (24 * 60 * 60 * 1000)) : 1;
+    const lookbackDays = firstSync ? 730 : Math.min(7, Math.max(2, elapsedDays + 1));
+    const result = await window.getPreplyStatisticsViaAppsScript?.({ days: lookbackDays });
+    if (!result?.success) {
+        throw new Error(result?.message || "Could not load Preply calendar statistics.");
+    }
     const currentEventIds = Array.isArray(result.eventIds) ? result.eventIds.map(String) : [];
     const currentStudentKeys = Array.isArray(result.studentKeys) ? result.studentKeys.map(String) : [];
     const existingEventIds = new Set(Array.isArray(previous.processedEventIds) ? previous.processedEventIds.map(String) : []);
     const existingStudentKeys = new Set(Array.isArray(previous.knownStudentKeys) ? previous.knownStudentKeys.map(String) : []);
-    const firstSync = previous.initialized !== true;
     const newEventIds = firstSync ? [] : currentEventIds.filter((eventId) => !existingEventIds.has(eventId));
     const newStudentKeys = firstSync ? [] : currentStudentKeys.filter((studentKey) => !existingStudentKeys.has(studentKey));
     const currentLessons = parseProfileCounter(state.profileSettings?.hoursTaught, 1200);
@@ -5646,6 +5653,7 @@ async function syncPreplyStatistics() {
         studentsAdded: Number(previous.studentsAdded || 0) + newStudentKeys.length,
         lastCalendarLessonCount: Number(result.completedLessons || 0),
         lastCalendarStudentCount: Number(result.uniqueStudents || 0),
+        lastLookbackDays: lookbackDays,
         lastSyncedAt: now,
     };
     await teacherRef.set({
@@ -5706,12 +5714,17 @@ async function syncPlatformStatistics() {
     const newStudentKeys = platformInitialized
         ? studentKeys.filter((key) => !knownStudentKeys.has(key))
         : [];
+    const nextLessonIds = Array.from(new Set([...knownLessonIds, ...completedIds])).slice(-5000);
+    const nextStudentKeys = Array.from(new Set([...knownStudentKeys, ...studentKeys])).slice(-5000);
+    const unchanged = platformInitialized && !newLessonIds.length && !newStudentKeys.length &&
+        nextLessonIds.length === knownLessonIds.size && nextStudentKeys.length === knownStudentKeys.size;
+    if (unchanged) return { firstSync: false, newLessons: 0, newStudents: 0 };
     const syncedAt = Date.now();
     const calendarStatistics = {
         ...previous,
         platformInitialized: true,
-        processedPlatformBookingIds: Array.from(new Set([...knownLessonIds, ...completedIds])).slice(-5000),
-        knownPlatformStudentKeys: Array.from(new Set([...knownStudentKeys, ...studentKeys])).slice(-5000),
+        processedPlatformBookingIds: nextLessonIds,
+        knownPlatformStudentKeys: nextStudentKeys,
         platformLessonsAdded: Number(previous.platformLessonsAdded || 0) + newLessonIds.length,
         platformStudentsAdded: Number(previous.platformStudentsAdded || 0) + newStudentKeys.length,
         lastPlatformLessonCount: completedIds.length,
@@ -5755,7 +5768,7 @@ function startPreplyStatisticsAutoSync() {
         syncPreplyStatistics().catch((error) => {
             console.warn("Automatic Preply statistics sync failed.", error);
         });
-    }, 60 * 60 * 1000);
+    }, 24 * 60 * 60 * 1000);
 }
 
 function updateSystemSyncStatusIndicator() {
@@ -6834,6 +6847,7 @@ async function refreshTeacherStudents() {
     els.teacherStudentsList.innerHTML = "<div class=\"small-note\">Loading students...</div>";
     state.studentCache.clear();
     try {
+        state.teacherStudentsLastRefreshAt = Date.now();
         const [snap, accountingSnap, entitlementSnap] = await Promise.all([
             window.db.collection("users").where("role", "==", "student").get(),
             window.db.collection("studentAccounting").get(),
@@ -8779,9 +8793,12 @@ async function handleAuthState(user) {
     startTeacherBookingsListener();
     startTeacherLessonFeedbackListener();
     if (teacherData.calendarStatistics?.initialized === true) {
-        syncPreplyStatistics().catch((error) => {
-            console.warn("Initial Preply statistics refresh failed.", error);
-        });
+        const lastStatisticsSync = Number(teacherData.calendarStatistics?.lastSyncedAt || 0);
+        if (Date.now() - lastStatisticsSync >= 24 * 60 * 60 * 1000) {
+            syncPreplyStatistics().catch((error) => {
+                console.warn("Initial Preply statistics refresh failed.", error);
+            });
+        }
         startPreplyStatisticsAutoSync();
     }
     startBalanceReconcileAutoRefresh();
