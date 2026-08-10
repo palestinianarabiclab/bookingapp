@@ -7314,23 +7314,43 @@ async function consumeBookingTransactionally(doc, now, missingPrice) {
 async function reconcileStudentBalances() {
     if (typeof window.runLessonConsumptionNow !== "function") {
         console.warn("The server-side lesson consumption worker is unavailable; the scheduled worker will retry later.");
-        return { chargedCount: 0, missingPriceCount: 0, deferred: true };
+        return reconcileStudentBalancesInBrowserFallback();
     }
     let serverResult;
     try {
         serverResult = await window.runLessonConsumptionNow();
     } catch (error) {
-        console.warn("Immediate lesson consumption check failed; the scheduled worker will retry later.", error);
-        return { chargedCount: 0, missingPriceCount: 0, deferred: true };
+        console.warn("Immediate lesson consumption check failed; using the teacher-side transactional recovery.", error);
+        return reconcileStudentBalancesInBrowserFallback();
     }
     if (!serverResult?.success) {
-        console.warn("Immediate lesson consumption check was deferred:", serverResult?.message || "Lesson consumption failed.");
-        return { chargedCount: 0, missingPriceCount: 0, deferred: true };
+        console.warn("Immediate lesson consumption check was deferred; using the teacher-side transactional recovery:", serverResult?.message || "Lesson consumption failed.");
+        return reconcileStudentBalancesInBrowserFallback();
     }
     return {
         chargedCount: Number(serverResult.consumption?.consumed || 0),
         missingPriceCount: Number(serverResult.consumption?.failed || 0),
     };
+}
+
+async function reconcileStudentBalancesInBrowserFallback() {
+    const now = Date.now();
+    const docs = await loadBalanceChargeCandidates(now);
+    const missingPrice = new Set();
+    let chargedCount = 0;
+    for (const doc of docs) {
+        const booking = doc.data() || {};
+        const status = String(booking.status || "booked").toLowerCase();
+        const canceledAt = Number(booking.canceledAt || 0);
+        const systemConflict = Array.isArray(booking.history) && booking.history.some((item) => item?.action === "calendar-conflict");
+        const lateCanceled = status === "canceled" && !systemConflict &&
+            String(booking.canceledBy || "student").toLowerCase() === "student" && canceledAt > 0 &&
+            Number(booking.slot || 0) - canceledAt < STUDENT_CHANGE_CUTOFF_MS;
+        if (!booking.studentUid || booking.balanceChargedAt || booking.balanceCharged) continue;
+        if (!isConsumptionEligible(booking, now) && !lateCanceled) continue;
+        if (await consumeBookingTransactionally(doc, now, missingPrice)) chargedCount += 1;
+    }
+    return { chargedCount, missingPriceCount: missingPrice.size, recoveredInBrowser: true };
 }
 
 async function reconcileStudentBalancesLegacyUnused() {

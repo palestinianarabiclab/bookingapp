@@ -452,7 +452,10 @@ function firestoreFetch_(config, token, path, options) {
   const text = res.getContentText();
   const data = text ? JSON.parse(text) : {};
   if (res.getResponseCode() >= 300) {
-    throw new Error(data.error && data.error.message ? data.error.message : 'Firestore request failed.');
+    const errorPayload = Array.isArray(data) ? data.find(function (item) { return item && item.error; }) : data;
+    throw new Error(errorPayload && errorPayload.error && errorPayload.error.message
+      ? errorPayload.error.message
+      : 'Firestore request failed with HTTP ' + res.getResponseCode() + '.');
   }
   return data;
 }
