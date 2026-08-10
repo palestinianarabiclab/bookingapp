@@ -391,7 +391,7 @@ export async function submitGuestBooking({
                 : null;
             if (bookingSuccessWhatsAppBtn) {
                 bookingSuccessWhatsAppBtn.hidden = !whatsappUrl;
-                if (whatsappUrl) bookingSuccessWhatsAppBtn.href = whatsappUrl;
+                bookingSuccessWhatsAppBtn.href = whatsappUrl || "#";
             }
             if (bookingSuccessTrialIntro) {
                 bookingSuccessTrialIntro.hidden = !whatsappUrl;

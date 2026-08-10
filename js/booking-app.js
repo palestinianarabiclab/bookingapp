@@ -11,7 +11,7 @@ import {
 } from "./logic/contactSettingsStore.js";
 import {
     submitGuestBooking,
-} from "./logic/guestBookingFlow.js?v=20260726-booking-recovery-v1";
+} from "./logic/guestBookingFlow.js?v=20260810-trial-whatsapp-v2";
 import {
     getAvailableLessonCredits,
     getBookingSlotClaimIds,
@@ -888,23 +888,25 @@ function updateStudentBalanceUi() {
     }
     if (!signedIn) return;
     
-    const ownedLessons = getStudentTotalLessonCredits();
-    const reservedLessons = Math.max(0, Number(state.studentEntitlement?.reservedLessonCredits || 0));
-    const availableLessons = Math.max(0, ownedLessons - reservedLessons);
-    if (els.studentBalanceValue) els.studentBalanceValue.textContent = String(availableLessons);
-    
+    if (els.studentBalanceValue) {
+        els.studentBalanceValue.textContent = "Lesson credits";
+    }
+
     if (els.studentLessonPriceValue) {
-        els.studentLessonPriceValue.textContent = `${reservedLessons} reserved`;
+        els.studentLessonPriceValue.textContent = "";
+        els.studentLessonPriceValue.hidden = true;
+        els.studentLessonPriceValue.style.display = "none";
     }
 
     const remainingBadge = document.getElementById("studentRemainingLessonsBadge");
     if (remainingBadge) {
-        if (ownedLessons > 0) {
-            remainingBadge.textContent = `(${ownedLessons} lesson${ownedLessons === 1 ? "" : "s"} owned)`;
-            remainingBadge.style.background = "var(--primary)";
+        const ownedLessons = getStudentTotalLessonCredits();
+        const reservedLessons = Math.max(0, Number(state.studentEntitlement?.reservedLessonCredits || 0));
+        const availableLessons = Math.max(0, ownedLessons - reservedLessons);
+        if (availableLessons > 0) {
+            remainingBadge.innerHTML = `<span><small>Total</small><strong>${ownedLessons}</strong></span><span><small>Reserved</small><strong>${reservedLessons}</strong></span><span class="is-available"><small>Available</small><strong>${availableLessons}</strong></span>`;
         } else {
-            remainingBadge.textContent = `(0 lessons owned)`;
-            remainingBadge.style.background = "var(--ink-light)";
+            remainingBadge.innerHTML = `<span><small>Total</small><strong>${ownedLessons}</strong></span><span><small>Reserved</small><strong>${reservedLessons}</strong></span><span class="is-empty"><small>Available</small><strong>0</strong></span>`;
         }
     }
 
