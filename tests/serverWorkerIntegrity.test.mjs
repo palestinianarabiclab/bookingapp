@@ -29,5 +29,6 @@ test("external Calendar deletion releases authoritative entitlement", () => {
 test("unchanged Calendar mirrors do not create recurring Firestore writes", () => {
     assert.match(source, /if \(!changed && matches\.length === 1\) return/);
     assert.match(source, /everyMinutes\(10\)/);
-    assert.match(source, /Date\.now\(\) \+ 120 \* 24 \* 60 \* 60 \* 1000/);
+    assert.match(source, /includeSecondMonth \? 60 : 31/);
+    assert.match(source, /CALENDAR_EXTENDED_RECONCILE_AT/);
 });

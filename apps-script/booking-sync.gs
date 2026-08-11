@@ -1361,8 +1361,12 @@ function deleteCalendarEventForFirestoreBooking_(config, doc) {
 function reconcilePlatformCalendarEvents_(config) {
   const cal = CalendarApp.getCalendarById(config.primaryCalendarId);
   if (!cal) throw new Error('Primary calendar not found.');
-  const start = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const end = new Date(Date.now() + 120 * 24 * 60 * 60 * 1000);
+  const now = Date.now();
+  const properties = PropertiesService.getScriptProperties();
+  const lastExtendedAt = Number(properties.getProperty('CALENDAR_EXTENDED_RECONCILE_AT') || 0);
+  const includeSecondMonth = now - lastExtendedAt >= 24 * 60 * 60 * 1000;
+  const start = new Date(now - 24 * 60 * 60 * 1000);
+  const end = new Date(now + (includeSecondMonth ? 60 : 31) * 24 * 60 * 60 * 1000);
   const events = cal.getEvents(start, end);
   const byBookingId = {};
   events.forEach(function (event) {
@@ -1421,8 +1425,8 @@ function reconcilePlatformCalendarEvents_(config) {
     firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), values);
   });
   const syncedBookingMap = {};
-  const reconciliationStart = Date.now() - 24 * 60 * 60 * 1000;
-  const reconciliationEnd = Date.now() + 120 * 24 * 60 * 60 * 1000;
+  const reconciliationStart = now - 24 * 60 * 60 * 1000;
+  const reconciliationEnd = end.getTime();
   const reconciliationWindow = 30 * 24 * 60 * 60 * 1000;
   for (var windowStart = reconciliationStart; windowStart < reconciliationEnd; windowStart += reconciliationWindow) {
     queryBookingsAdmin_(config, [
@@ -1442,6 +1446,7 @@ function reconcilePlatformCalendarEvents_(config) {
     firestorePatchAdmin_(config, 'publicBookings/' + encodeURIComponent(bookingId), { status: 'canceled', calendarSynced: false, updatedAt: Date.now() });
     getSlotClaimIds_(slot, duration).forEach(function (id) { firestoreDeleteAdmin_(config, 'bookingSlotClaims/' + id); });
   });
+  if (includeSecondMonth) properties.setProperty('CALENDAR_EXTENDED_RECONCILE_AT', String(now));
   return byBookingId;
 }
 

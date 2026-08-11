@@ -465,3 +465,88 @@
 [info] +  Deploy complete! 
 [info] 
 [info] Project Console: https://console.firebase.google.com/project/farouqapp-7ea93/overview
+[debug] [2026-08-11T19:21:08.352Z] ----------------------------------------------------------------------
+[debug] [2026-08-11T19:21:08.358Z] Command:       C:\Program Files\nodejs\node.exe C:\Users\farou\AppData\Local\npm-cache\_npx\7750544ccf494d8b\node_modules\firebase-tools\lib\bin\firebase.js deploy --only firestore:indexes --project farouqapp-7ea93
+[debug] [2026-08-11T19:21:08.358Z] CLI Version:   15.26.0
+[debug] [2026-08-11T19:21:08.358Z] Platform:      win32
+[debug] [2026-08-11T19:21:08.359Z] Node Version:  v24.15.0
+[debug] [2026-08-11T19:21:08.359Z] Detected Agent: codex_cli
+[debug] [2026-08-11T19:21:08.359Z] Time:          Tue Aug 11 2026 22:21:08 GMT+0300 (Eastern European Summer Time)
+[debug] [2026-08-11T19:21:08.359Z] ----------------------------------------------------------------------
+[debug] 
+[debug] [2026-08-11T19:21:08.389Z] >>> [apiv2][query] GET https://firebase-public.firebaseio.com/cli.json [none]
+[debug] [2026-08-11T19:21:11.770Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-08-11T19:21:11.771Z] > authorizing via signed-in user (farouqmurtaja96@gmail.com)
+[debug] [2026-08-11T19:21:11.771Z] [iam] checking project farouqapp-7ea93 for permissions ["datastore.indexes.create","datastore.indexes.delete","datastore.indexes.list","datastore.indexes.update","firebase.projects.get"]
+[debug] [2026-08-11T19:21:11.774Z] Checked if tokens are valid: false, expires at: 1786285152117
+[debug] [2026-08-11T19:21:11.774Z] Checked if tokens are valid: false, expires at: 1786285152117
+[debug] [2026-08-11T19:21:11.774Z] > refreshing access token with scopes: []
+[debug] [2026-08-11T19:21:11.777Z] >>> [apiv2][query] POST https://www.googleapis.com/oauth2/v3/token [none]
+[debug] [2026-08-11T19:21:11.777Z] >>> [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-08-11T19:21:11.993Z] <<< [apiv2][status] POST https://www.googleapis.com/oauth2/v3/token 200
+[debug] [2026-08-11T19:21:11.994Z] <<< [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-08-11T19:21:12.005Z] >>> [apiv2][query] POST https://cloudresourcemanager.googleapis.com/v1/projects/farouqapp-7ea93:testIamPermissions [none]
+[debug] [2026-08-11T19:21:12.006Z] >>> [apiv2][(partial)header] POST https://cloudresourcemanager.googleapis.com/v1/projects/farouqapp-7ea93:testIamPermissions  x-goog-user-project=farouqapp-7ea93
+[debug] [2026-08-11T19:21:12.006Z] >>> [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects/farouqapp-7ea93:testIamPermissions {"permissions":["datastore.indexes.create","datastore.indexes.delete","datastore.indexes.list","datastore.indexes.update","firebase.projects.get"]}
+[debug] [2026-08-11T19:21:12.182Z] <<< [apiv2][status] GET https://firebase-public.firebaseio.com/cli.json 200
+[debug] [2026-08-11T19:21:12.182Z] <<< [apiv2][body] GET https://firebase-public.firebaseio.com/cli.json {"cloudBuildErrorAfter":1594252800000,"cloudBuildWarnAfter":1590019200000,"defaultNode10After":1594252800000,"minVersion":"3.0.5","node8DeploysDisabledAfter":1613390400000,"node8RuntimeDisabledAfter":1615809600000,"node8WarnAfter":1600128000000}
+[debug] [2026-08-11T19:21:12.818Z] <<< [apiv2][status] POST https://cloudresourcemanager.googleapis.com/v1/projects/farouqapp-7ea93:testIamPermissions 200
+[debug] [2026-08-11T19:21:12.818Z] <<< [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects/farouqapp-7ea93:testIamPermissions {"permissions":["datastore.indexes.create","datastore.indexes.delete","datastore.indexes.list","datastore.indexes.update","firebase.projects.get"]}
+[info] 
+[info] === Deploying to 'farouqapp-7ea93'...
+[info] 
+[info] i  deploying firestore 
+[info] i  firestore: ensuring required API firestore.googleapis.com is enabled... 
+[info] i  firestore: ensuring required API firestore.googleapis.com is enabled... 
+[debug] [2026-08-11T19:21:12.824Z] Checked if tokens are valid: true, expires at: 1786479670994
+[debug] [2026-08-11T19:21:12.825Z] Checked if tokens are valid: true, expires at: 1786479670994
+[debug] [2026-08-11T19:21:12.825Z] >>> [apiv2][query] GET https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default) [none]
+[debug] [2026-08-11T19:21:13.738Z] <<< [apiv2][status] GET https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default) 200
+[debug] [2026-08-11T19:21:13.738Z] <<< [apiv2][body] GET https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default) {"name":"projects/farouqapp-7ea93/databases/(default)","uid":"5b8ce7e5-d091-4c34-a742-15411a47d9d4","createTime":"2026-05-10T12:14:00.315804Z","updateTime":"2026-05-10T12:14:00.315804Z","locationId":"nam5","type":"FIRESTORE_NATIVE","concurrencyMode":"PESSIMISTIC","versionRetentionPeriod":"3600s","earliestVersionTime":"2026-08-11T18:21:16.074849Z","appEngineIntegrationMode":"DISABLED","keyPrefix":"s","pointInTimeRecoveryEnablement":"POINT_IN_TIME_RECOVERY_DISABLED","deleteProtectionState":"DELETE_PROTECTION_DISABLED","databaseEdition":"STANDARD","freeTier":true,"realtimeUpdatesMode":"REALTIME_UPDATES_MODE_ENABLED","etag":"IL+KqP+lmZYDMJW3u+jdrpQD"}
+[info] i  firestore: reading indexes from firestore.indexes.json... 
+[info] i  cloud.firestore: checking firestore.rules for compilation errors... 
+[debug] [2026-08-11T19:21:13.746Z] Checked if tokens are valid: true, expires at: 1786479670994
+[debug] [2026-08-11T19:21:13.746Z] Checked if tokens are valid: true, expires at: 1786479670994
+[debug] [2026-08-11T19:21:13.746Z] >>> [apiv2][query] POST https://firebaserules.googleapis.com/v1/projects/farouqapp-7ea93:test [none]
+[debug] [2026-08-11T19:21:13.746Z] >>> [apiv2][body] POST https://firebaserules.googleapis.com/v1/projects/farouqapp-7ea93:test [omitted]
+[debug] [2026-08-11T19:21:14.796Z] <<< [apiv2][status] POST https://firebaserules.googleapis.com/v1/projects/farouqapp-7ea93:test 200
+[debug] [2026-08-11T19:21:14.797Z] <<< [apiv2][body] POST https://firebaserules.googleapis.com/v1/projects/farouqapp-7ea93:test {"issues":[{"sourcePosition":{"fileName":"firestore.rules","line":83,"column":14,"currentOffset":2502,"endOffset":2517},"description":"Unused function: reservationCount.","severity":"WARNING"},{"sourcePosition":{"fileName":"firestore.rules","line":87,"column":14,"currentOffset":2640,"endOffset":2656},"description":"Unused function: lessonEntitlement.","severity":"WARNING"},{"sourcePosition":{"fileName":"firestore.rules","line":97,"column":14,"currentOffset":3075,"endOffset":3089},"description":"Unused function: allowsOverdraft.","severity":"WARNING"}]}
+[warn] !  [W] 83:14 - Unused function: reservationCount. 
+[warn] !  [W] 87:14 - Unused function: lessonEntitlement. 
+[warn] !  [W] 97:14 - Unused function: allowsOverdraft. 
+[info] +  cloud.firestore: rules file firestore.rules compiled successfully 
+[info] i  firestore: deploying indexes... 
+[debug] [2026-08-11T19:21:14.800Z] Checked if tokens are valid: true, expires at: 1786479670994
+[debug] [2026-08-11T19:21:14.800Z] Checked if tokens are valid: true, expires at: 1786479670994
+[debug] [2026-08-11T19:21:14.800Z] >>> [apiv2][query] GET https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default)/collectionGroups/-/indexes [none]
+[debug] [2026-08-11T19:21:15.031Z] <<< [apiv2][status] GET https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default)/collectionGroups/-/indexes 200
+[debug] [2026-08-11T19:21:15.031Z] <<< [apiv2][body] GET https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default)/collectionGroups/-/indexes {}
+[debug] [2026-08-11T19:21:15.032Z] Checked if tokens are valid: true, expires at: 1786479670994
+[debug] [2026-08-11T19:21:15.032Z] Checked if tokens are valid: true, expires at: 1786479670994
+[debug] [2026-08-11T19:21:15.032Z] >>> [apiv2][query] GET https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default)/collectionGroups/-/fields?filter=indexConfig.usesAncestorConfig=false OR ttlConfig:* [none]
+[debug] [2026-08-11T19:21:15.246Z] <<< [apiv2][status] GET https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default)/collectionGroups/-/fields?filter=indexConfig.usesAncestorConfig=false OR ttlConfig:* 200
+[debug] [2026-08-11T19:21:15.247Z] <<< [apiv2][body] GET https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default)/collectionGroups/-/fields?filter=indexConfig.usesAncestorConfig=false OR ttlConfig:* {"fields":[{"name":"projects/farouqapp-7ea93/databases/(default)/collectionGroups/__default__/fields/*","indexConfig":{"indexes":[{"queryScope":"COLLECTION","fields":[{"fieldPath":"*","order":"ASCENDING"}],"state":"READY"},{"queryScope":"COLLECTION","fields":[{"fieldPath":"*","order":"DESCENDING"}],"state":"READY"},{"queryScope":"COLLECTION","fields":[{"fieldPath":"*","arrayConfig":"CONTAINS"}],"state":"READY"}]}}]}
+[debug] [2026-08-11T19:21:15.247Z] Checked if tokens are valid: true, expires at: 1786479670994
+[debug] [2026-08-11T19:21:15.247Z] Checked if tokens are valid: true, expires at: 1786479670994
+[debug] [2026-08-11T19:21:15.247Z] >>> [apiv2][query] GET https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default) [none]
+[debug] [2026-08-11T19:21:15.457Z] <<< [apiv2][status] GET https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default) 200
+[debug] [2026-08-11T19:21:15.458Z] <<< [apiv2][body] GET https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default) {"name":"projects/farouqapp-7ea93/databases/(default)","uid":"5b8ce7e5-d091-4c34-a742-15411a47d9d4","createTime":"2026-05-10T12:14:00.315804Z","updateTime":"2026-05-10T12:14:00.315804Z","locationId":"nam5","type":"FIRESTORE_NATIVE","concurrencyMode":"PESSIMISTIC","versionRetentionPeriod":"3600s","earliestVersionTime":"2026-08-11T18:21:17.798298Z","appEngineIntegrationMode":"DISABLED","keyPrefix":"s","pointInTimeRecoveryEnablement":"POINT_IN_TIME_RECOVERY_DISABLED","deleteProtectionState":"DELETE_PROTECTION_DISABLED","databaseEdition":"STANDARD","freeTier":true,"realtimeUpdatesMode":"REALTIME_UPDATES_MODE_ENABLED","etag":"IJagkYCmmZYDMJW3u+jdrpQD"}
+[debug] [2026-08-11T19:21:15.458Z] Creating new index: {"collectionGroup":"bookings","queryScope":"COLLECTION","fields":[{"fieldPath":"studentUid","order":"ASCENDING"},{"fieldPath":"slot","order":"DESCENDING"}]}
+[debug] [2026-08-11T19:21:15.458Z] Checked if tokens are valid: true, expires at: 1786479670994
+[debug] [2026-08-11T19:21:15.458Z] Checked if tokens are valid: true, expires at: 1786479670994
+[debug] [2026-08-11T19:21:15.458Z] >>> [apiv2][query] POST https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default)/collectionGroups/bookings/indexes [none]
+[debug] [2026-08-11T19:21:15.459Z] >>> [apiv2][body] POST https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default)/collectionGroups/bookings/indexes {"fields":[{"fieldPath":"studentUid","order":"ASCENDING"},{"fieldPath":"slot","order":"DESCENDING"}],"queryScope":"COLLECTION"}
+[debug] [2026-08-11T19:21:15.916Z] <<< [apiv2][status] POST https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default)/collectionGroups/bookings/indexes 200
+[debug] [2026-08-11T19:21:15.917Z] <<< [apiv2][body] POST https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default)/collectionGroups/bookings/indexes {"name":"projects/farouqapp-7ea93/databases/(default)/operations/S0U0aFhqT2dBQ0lDDCoDIDc0MTBhYjY3NWQxNi01YWViLTc1ZTQtMDZlYS00N2ZiYTY0NyQac2VuaWxlcGlwCQpBEg","metadata":{"@type":"type.googleapis.com/google.firestore.admin.v1.IndexOperationMetadata","startTime":"2026-08-11T19:21:18.129333Z","index":"projects/farouqapp-7ea93/databases/(default)/collectionGroups/bookings/indexes/CICAgOjXh4EK","state":"INITIALIZING"}}
+[debug] [2026-08-11T19:21:15.917Z] Creating new index: {"collectionGroup":"bookings","queryScope":"COLLECTION","fields":[{"fieldPath":"email","order":"ASCENDING"},{"fieldPath":"slot","order":"DESCENDING"}]}
+[debug] [2026-08-11T19:21:15.917Z] Checked if tokens are valid: true, expires at: 1786479670994
+[debug] [2026-08-11T19:21:15.917Z] Checked if tokens are valid: true, expires at: 1786479670994
+[debug] [2026-08-11T19:21:15.917Z] >>> [apiv2][query] POST https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default)/collectionGroups/bookings/indexes [none]
+[debug] [2026-08-11T19:21:15.917Z] >>> [apiv2][body] POST https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default)/collectionGroups/bookings/indexes {"fields":[{"fieldPath":"email","order":"ASCENDING"},{"fieldPath":"slot","order":"DESCENDING"}],"queryScope":"COLLECTION"}
+[debug] [2026-08-11T19:21:16.306Z] <<< [apiv2][status] POST https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default)/collectionGroups/bookings/indexes 200
+[debug] [2026-08-11T19:21:16.306Z] <<< [apiv2][body] POST https://firestore.googleapis.com/v1/projects/farouqapp-7ea93/databases/(default)/collectionGroups/bookings/indexes {"name":"projects/farouqapp-7ea93/databases/(default)/operations/S01vcFVpSmdBQ0lDDCoDIDYwZTU3ZTQ1MDM0OC0wNmZhLTkwNzQtOGViMS04MTc3ZDVmNSQac2VuaWxlcGlwCQpBEg","metadata":{"@type":"type.googleapis.com/google.firestore.admin.v1.IndexOperationMetadata","startTime":"2026-08-11T19:21:18.563258Z","index":"projects/farouqapp-7ea93/databases/(default)/collectionGroups/bookings/indexes/CICAgJiUpoMK","state":"INITIALIZING"}}
+[info] +  firestore: deployed indexes in firestore.indexes.json successfully for (default) database 
+[info] 
+[info] +  Deploy complete! 
+[info] 
+[info] Project Console: https://console.firebase.google.com/project/farouqapp-7ea93/overview

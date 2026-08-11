@@ -7,6 +7,7 @@ export async function renderTeacherBookings({
     bookingCache,
     escapeHtml,
     formatSlotTime,
+    snapshot = null,
 }) {
     if (!teacherBookingList) return bookingCache;
     teacherBookingList.innerHTML = "<div class=\"small-note\">Loading bookings...</div>";
@@ -14,14 +15,16 @@ export async function renderTeacherBookings({
     try {
         const now = Date.now();
         const calendarHistoryStart = Date.now() - 60 * 24 * 60 * 60 * 1000;
-        let snap;
+        let snap = snapshot;
         try {
-            snap = await db
-                .collection("bookings")
-                .where("slot", ">=", calendarHistoryStart)
-                .orderBy("slot")
-                .limit(100)
-                .get();
+            if (!snap) {
+                snap = await db
+                    .collection("bookings")
+                    .where("slot", ">=", calendarHistoryStart)
+                    .orderBy("slot")
+                    .limit(100)
+                    .get();
+            }
         } catch (queryError) {
             const code = queryError?.code || "";
             const message = String(queryError?.message || "");

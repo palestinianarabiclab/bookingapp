@@ -32,7 +32,7 @@ import {
     rescheduleBooking,
     resizeBookingDuration,
     clearAllBookings,
-} from "./logic/teacherBookingAdmin.js?v=20260726-audit-v3";
+} from "./logic/teacherBookingAdmin.js?v=20260811-snapshot-reuse-v4";
 import {
     bootstrapTeacherAccess,
     resolveUserRole,
@@ -1373,6 +1373,8 @@ function startTeacherBookingsListener() {
     if (!window.db || !state.teacherUser || state.teacherRole !== "teacher") return;
     const historyStart = Date.now() - 60 * 24 * 60 * 60 * 1000;
     state.teacherBookingsUnsubscribe = window.db.collection("bookings").where("slot", ">=", historyStart)
+        .orderBy("slot")
+        .limit(150)
         .onSnapshot((snapshot) => {
             const fingerprint = snapshot.docs.map((doc) => {
                 const booking = doc.data() || {};
@@ -1384,7 +1386,7 @@ function startTeacherBookingsListener() {
             if (state.teacherBookingsRefreshTimer) window.clearTimeout(state.teacherBookingsRefreshTimer);
             state.teacherBookingsRefreshTimer = window.setTimeout(() => {
                 state.teacherBookingsRefreshTimer = null;
-                refreshTeacherBookings({ reconcileBalances: false }).catch(console.error);
+                refreshTeacherBookings({ reconcileBalances: false, bookingSnapshot: snapshot }).catch(console.error);
             }, 300);
         }, (error) => console.warn("Teacher booking live refresh failed.", error));
 }
@@ -1975,7 +1977,7 @@ function renderUpcomingLessonBanner(bookings) {
     upcomingBannerInterval = setInterval(updateBannerContent, 30000);
 }
 
-async function loadStudentBookings() {
+async function loadStudentBookings({ includeHistory = false, expandHistory = false } = {}) {
     if (!els.bookingStatusList) return;
     els.bookingStatusList.innerHTML = "";
     if (!state.currentUser || state.currentRole !== "student") {
@@ -1990,11 +1992,11 @@ async function loadStudentBookings() {
 
         // 1. Query bookings by studentUid
         try {
-            snapUid = await window.db
+            let uidQuery = window.db
                 .collection("bookings")
-                .where("studentUid", "==", state.currentUser.uid)
-                .limit(100)
-                .get();
+                .where("studentUid", "==", state.currentUser.uid);
+            if (!includeHistory) uidQuery = uidQuery.where("slot", ">=", Date.now() - 60 * 24 * 60 * 60 * 1000);
+            snapUid = await uidQuery.orderBy("slot", "desc").limit(includeHistory ? 100 : 40).get();
         } catch (e) {
             console.warn("Failed querying bookings by studentUid:", e);
         }
@@ -2002,11 +2004,11 @@ async function loadStudentBookings() {
         // 2. Query bookings by email
         if (email && (!snapUid || snapUid.empty)) {
             try {
-                snapEmail = await window.db
+                let emailQuery = window.db
                     .collection("bookings")
-                    .where("email", "==", email)
-                    .limit(100)
-                    .get();
+                    .where("email", "==", email);
+                if (!includeHistory) emailQuery = emailQuery.where("slot", ">=", Date.now() - 60 * 24 * 60 * 60 * 1000);
+                snapEmail = await emailQuery.orderBy("slot", "desc").limit(includeHistory ? 100 : 40).get();
             } catch (e) {
                 console.warn("Failed querying bookings by email:", e);
             }
@@ -2180,9 +2182,9 @@ async function loadStudentBookings() {
                         <span>🎓 Lessons You've Taken</span>
                         <span class="section-badge-count">${takenBookings.length}</span>
                     </h4>
-                    <button class="btn-toggle-section" id="toggleCompletedBtn">Show ▼</button>
+                    <button class="btn-toggle-section" id="toggleCompletedBtn">${expandHistory ? "Hide ▲" : "Show ▼"}</button>
                 </div>
-                <div class="booking-section-content" id="completedSectionContent" style="display: none;">
+                <div class="booking-section-content" id="completedSectionContent" style="display: ${expandHistory ? "block" : "none"};">
                     ${takenHtml}
                     ${canceledBookings.length ? `
                         <div style="margin: 16px 0 8px 0; border-top: 1px dashed var(--line); padding-top: 12px; font-weight: 700; font-size: 0.85rem; color: var(--muted);">
@@ -2209,8 +2211,12 @@ async function loadStudentBookings() {
             }
         };
 
-        const toggleCompleted = () => {
+        const toggleCompleted = async () => {
             if (compContent.style.display === "none") {
+                if (!includeHistory) {
+                    await loadStudentBookings({ includeHistory: true, expandHistory: true });
+                    return;
+                }
                 compContent.style.display = "block";
                 compToggleBtn.textContent = "Hide ▲";
             } else {
@@ -2234,9 +2240,9 @@ async function loadStudentBookings() {
                 toggleCompleted();
             }
         });
-        compToggleBtn?.addEventListener("click", (e) => {
+        compToggleBtn?.addEventListener("click", async (e) => {
             e.stopPropagation();
-            toggleCompleted();
+            await toggleCompleted();
         });
 
     } catch (error) {
@@ -2491,7 +2497,11 @@ function stopStudentBookingsListener() {
 function startStudentBookingsListener() {
     stopStudentBookingsListener();
     if (!window.db || !state.currentUser || state.currentRole !== "student") return;
-    state.studentBookingsUnsubscribe = window.db.collection("bookings").where("studentUid", "==", state.currentUser.uid)
+    state.studentBookingsUnsubscribe = window.db.collection("bookings")
+        .where("studentUid", "==", state.currentUser.uid)
+        .where("slot", ">=", Date.now() - 60 * 24 * 60 * 60 * 1000)
+        .orderBy("slot", "desc")
+        .limit(40)
         .onSnapshot((snapshot) => {
             const fingerprint = snapshot.docs.map((doc) => {
                 const booking = doc.data() || {};
@@ -3745,11 +3755,6 @@ function openClassroomModal(booking) {
 
     modal.classList.add("modal--open");
 
-    setTimeout(() => {
-        initWhiteboard();
-        if (booking.id) listenWhiteboardFromCloud(booking.id);
-    }, 150);
-
     // Auto-start 50-minute lesson timer countdown
     autoStartClassroomTimer();
 }
@@ -3760,7 +3765,6 @@ function closeClassroomModal() {
     if (modal) modal.classList.remove("modal--open");
     if (container) container.innerHTML = "";
     if (classroomTimerInterval) clearInterval(classroomTimerInterval);
-    if (wbUnsubscribe) wbUnsubscribe();
     classroomTimerRunning = false;
 }
 
@@ -4432,66 +4436,24 @@ function wireStudentActions() {
         button.addEventListener("click", () => closeClassroomModal());
     });
 
-    const tabBoardBtn = document.getElementById("classroomTabBoardBtn");
     const tabNotesBtn = document.getElementById("classroomTabNotesBtn");
     const tabMaterialsBtn = document.getElementById("classroomTabMaterialsBtn");
 
-    const boardTab = document.getElementById("classroomBoardTab");
     const notesTab = document.getElementById("classroomNotesTab");
     const materialsTab = document.getElementById("classroomMaterialsTab");
 
-    tabBoardBtn?.addEventListener("click", () => {
-        if (boardTab) boardTab.style.display = "flex";
-        if (notesTab) notesTab.style.display = "none";
-        if (materialsTab) materialsTab.style.display = "none";
-        tabBoardBtn.className = "btn btn--small btn--primary";
-        if (tabNotesBtn) tabNotesBtn.className = "btn btn--small btn--ghost";
-        if (tabMaterialsBtn) tabMaterialsBtn.className = "btn btn--small btn--ghost";
-        setTimeout(() => initWhiteboard(), 100);
-    });
-
     tabNotesBtn?.addEventListener("click", () => {
-        if (boardTab) boardTab.style.display = "none";
         if (notesTab) notesTab.style.display = "flex";
         if (materialsTab) materialsTab.style.display = "none";
         tabNotesBtn.className = "btn btn--small btn--primary";
-        if (tabBoardBtn) tabBoardBtn.className = "btn btn--small btn--ghost";
         if (tabMaterialsBtn) tabMaterialsBtn.className = "btn btn--small btn--ghost";
     });
 
     tabMaterialsBtn?.addEventListener("click", () => {
-        if (boardTab) boardTab.style.display = "none";
         if (notesTab) notesTab.style.display = "none";
         if (materialsTab) materialsTab.style.display = "flex";
         tabMaterialsBtn.className = "btn btn--small btn--primary";
-        if (tabBoardBtn) tabBoardBtn.className = "btn btn--small btn--ghost";
         if (tabNotesBtn) tabNotesBtn.className = "btn btn--small btn--ghost";
-    });
-
-    // Whiteboard tool buttons
-    document.getElementById("wbColorPicker")?.addEventListener("change", (e) => {
-        wbCurrentColor = e.target.value;
-        wbCurrentTool = "pen";
-    });
-
-    document.getElementById("wbPenBtn")?.addEventListener("click", () => {
-        wbCurrentTool = "pen";
-    });
-
-    document.getElementById("wbHighlighterBtn")?.addEventListener("click", () => {
-        wbCurrentTool = "highlighter";
-    });
-
-    document.getElementById("wbEraserBtn")?.addEventListener("click", () => {
-        wbCurrentTool = "eraser";
-    });
-
-    document.getElementById("wbClearBtn")?.addEventListener("click", () => {
-        clearWhiteboard();
-    });
-
-    document.getElementById("wbSyncBtn")?.addEventListener("click", () => {
-        saveWhiteboardToCloud();
     });
 
     document.getElementById("classroomLaunchNewTabBtn")?.addEventListener("click", () => {
@@ -5333,6 +5295,9 @@ function switchTeacherTab(tabId) {
     if (tabId === "tab-students" && Date.now() - state.teacherStudentsLastRefreshAt >= 30000) {
         refreshTeacherStudents().catch((error) => console.warn("Could not refresh students.", error));
     }
+    if (tabId === "tab-reviews") {
+        refreshTeacherLessonFeedback().catch((error) => console.warn("Could not refresh lesson feedback.", error));
+    }
 }
 
 let teacherUpcomingBannerInterval = null;
@@ -5836,7 +5801,7 @@ if (typeof window !== "undefined") {
     });
 }
 
-async function refreshTeacherBookings({ reconcileBalances = false } = {}) {
+async function refreshTeacherBookings({ reconcileBalances = false, bookingSnapshot = null } = {}) {
     const balanceResult = reconcileBalances
         ? await reconcileStudentBalances()
         : { chargedCount: 0, missingPriceCount: 0 };
@@ -5852,6 +5817,7 @@ async function refreshTeacherBookings({ reconcileBalances = false } = {}) {
         bookingCache: state.bookingCache,
         escapeHtml,
         formatSlotTime,
+        snapshot: bookingSnapshot,
     });
     await syncPlatformStatistics().catch((error) => {
         console.warn("Automatic platform statistics sync failed.", error);
@@ -8813,7 +8779,7 @@ async function handleAuthState(user) {
     await refreshTeacherDashboard();
     startTeacherCalendarAutoRefresh();
     startTeacherBookingsListener();
-    startTeacherLessonFeedbackListener();
+    stopTeacherLessonFeedbackListener();
     if (teacherData.calendarStatistics?.initialized === true) {
         const lastStatisticsSync = Number(teacherData.calendarStatistics?.lastSyncedAt || 0);
         if (Date.now() - lastStatisticsSync >= 24 * 60 * 60 * 1000) {

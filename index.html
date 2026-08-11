@@ -1620,7 +1620,7 @@
                         <span>🎓 Farouq Arabic Live Classroom</span>
                         <span class="super-tutor-tag" style="font-size: 0.72rem;">GOOGLE MEET LIVE ROOM</span>
                     </h3>
-                    <p class="small-note" id="classroomSubHeader" style="margin: 2px 0 0;">Screen share, interactive whiteboard & auto-lesson counter</p>
+                    <p class="small-note" id="classroomSubHeader" style="margin: 2px 0 0;">Google Meet lesson room and lesson notes</p>
                 </div>
                 <div style="display: flex; align-items: center; gap: 10px;">
                     <button type="button" class="btn btn--primary btn--small" id="classroomLaunchNewTabBtn">📹 Open Video Room in New Page</button>
@@ -1638,37 +1638,16 @@
                     </div>
                 </div>
 
-                <!-- Right Sidebar: Interactive Board, Notes & Teaching Materials -->
+                <!-- Right Sidebar: Notes & Teaching Materials -->
                 <div style="display: flex; flex-direction: column; gap: 10px; background: var(--bg-soft); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 12px; height: 100%; overflow: hidden;">
                     <!-- Classroom Tabs -->
                     <div style="display: flex; gap: 6px; border-bottom: 1px solid var(--line); padding-bottom: 8px;">
-                        <button type="button" class="btn btn--small btn--primary" id="classroomTabBoardBtn">✏️ Whiteboard</button>
-                        <button type="button" class="btn btn--small btn--ghost" id="classroomTabNotesBtn">📝 Vocabulary & Notes</button>
+                        <button type="button" class="btn btn--small btn--primary" id="classroomTabNotesBtn">📝 Vocabulary & Notes</button>
                         <button type="button" class="btn btn--small btn--ghost" id="classroomTabMaterialsBtn">📚 Palestinian Materials</button>
                     </div>
 
-                    <!-- TAB 1: Whiteboard Canvas -->
-                    <div id="classroomBoardTab" style="display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0;">
-                        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px; background: #fff; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line);">
-                            <div style="display: flex; align-items: center; gap: 6px;">
-                                <input type="color" id="wbColorPicker" value="#0f172a" style="width: 28px; height: 28px; border: none; cursor: pointer; border-radius: 4px;" title="Pick Color" />
-                                <button type="button" class="btn btn--ghost btn--small" id="wbPenBtn" style="padding: 2px 6px;">🖊️ Pen</button>
-                                <button type="button" class="btn btn--ghost btn--small" id="wbHighlighterBtn" style="padding: 2px 6px;">🖍️ Yellow</button>
-                                <button type="button" class="btn btn--ghost btn--small" id="wbEraserBtn" style="padding: 2px 6px;">🧽 Eraser</button>
-                            </div>
-                            <div style="display: flex; align-items: center; gap: 6px;">
-                                <button type="button" class="btn btn--ghost btn--small" id="wbClearBtn" style="padding: 2px 6px; color: #ef4444;">🗑️ Clear</button>
-                                <button type="button" class="btn btn--outline btn--small" id="wbSyncBtn" style="padding: 2px 6px;">🔄 Sync Board</button>
-                            </div>
-                        </div>
-
-                        <div style="flex: 1; background: #ffffff; border: 1px solid var(--line); border-radius: 6px; position: relative; overflow: hidden; cursor: crosshair;">
-                            <canvas id="classroomWhiteboard" style="width: 100%; height: 100%; display: block; touch-action: none;"></canvas>
-                        </div>
-                    </div>
-
-                    <!-- TAB 2: Shared Vocabulary & Notes -->
-                    <div id="classroomNotesTab" style="display: none; flex-direction: column; gap: 8px; flex: 1; min-height: 0;">
+                    <!-- TAB 1: Shared Vocabulary & Notes -->
+                    <div id="classroomNotesTab" style="display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0;">
                         <p class="small-note" style="margin: 0;">Type Palestinian Arabic phrases and notes shared in real-time:</p>
                         <textarea id="classroomNotesTextarea" style="width: 100%; flex: 1; font-family: inherit; font-size: 0.92rem; padding: 10px; border-radius: 6px; border: 1px solid var(--line); resize: none;" placeholder="Write new Palestinian Arabic vocabulary, verb patterns, and expressions..."></textarea>
                         <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -1737,7 +1716,7 @@
 
     <script src="./js/firebase-bootstrap.js"></script>
 
-    <script type="module" src="./js/app.js?v=20260810-consumption-recovery-v30"></script>
+    <script type="module" src="./js/app.js?v=20260811-resource-reduction-v31"></script>
 </body>
 
 </html>
