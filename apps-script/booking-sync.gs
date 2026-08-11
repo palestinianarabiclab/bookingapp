@@ -829,7 +829,7 @@ function firestoreValue_(value) {
 }
 
 function firestoreDocumentName_(config, path) {
-  return firestoreBaseUrl_(config.firebaseProjectId) + '/' + path;
+  return 'projects/' + config.firebaseProjectId + '/databases/(default)/documents/' + path;
 }
 
 function firestoreBatchGetAdmin_(config, documentNames, transaction) {

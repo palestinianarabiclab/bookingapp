@@ -15,6 +15,11 @@ test("lesson consumption uses a Firestore transaction and deterministic ledger",
     assert.match(source, /currentDocument: \{ exists: false \}/);
 });
 
+test("Firestore transaction document names use resource names rather than REST URLs", () => {
+    assert.match(source, /return 'projects\/' \+ config\.firebaseProjectId \+ '\/databases\/\(default\)\/documents\/' \+ path/);
+    assert.doesNotMatch(source, /return firestoreBaseUrl_\(config\.firebaseProjectId\) \+ '\/' \+ path/);
+});
+
 test("external Calendar deletion releases authoritative entitlement", () => {
     assert.match(source, /studentEntitlements\//);
     assert.match(source, /releaseStudentReservationAdmin_/);
