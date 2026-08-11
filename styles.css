@@ -4723,6 +4723,11 @@ main.site-shell {
     color: #072f17;
 }
 
+/* The booking confirmation WhatsApp action is only for a free trial. */
+#bookingSuccessWhatsAppBtn[hidden] {
+    display: none;
+}
+
 .btn--whatsapp:hover {
     border-color: #169c46;
     background: #1fbd59;
