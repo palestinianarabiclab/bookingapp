@@ -32,3 +32,14 @@ test("legacy failed consumption is re-queued without changing balances directly"
     assert.doesNotMatch(repair, /lessonCredits:/);
     assert.doesNotMatch(repair, /balance:/);
 });
+
+test("legacy future lessons are reserved once without consuming money or credits", () => {
+    const start = app.indexOf("async function reconcileLegacyFutureReservations");
+    const end = app.indexOf("async function rotateFuturePricingVersions", start);
+    const repair = app.slice(start, end);
+    assert.match(repair, /legacyFutureReservationsV1/);
+    assert.match(repair, /reservedLessonCredits: Math\.max\(currentReserved, activeReservations\)/);
+    assert.match(repair, /reservationStatus: "reserved"/);
+    assert.doesNotMatch(repair, /lessonCredits:/);
+    assert.doesNotMatch(repair, /balance:/);
+});

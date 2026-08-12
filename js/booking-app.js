@@ -6857,6 +6857,69 @@ async function repairLegacyFailedConsumption() {
     return repairs.length;
 }
 
+async function reconcileLegacyFutureReservations() {
+    const markerRef = window.db.collection("teacherAccounting").doc("legacyFutureReservationsV1");
+    const marker = await markerRef.get();
+    if (marker.exists && marker.data()?.completed === true) return 0;
+
+    const now = Date.now();
+    const snapshot = await window.db.collection("bookings")
+        .where("slot", ">=", now - 24 * 60 * 60 * 1000)
+        .get();
+    const byStudent = new Map();
+    snapshot.forEach((doc) => {
+        const booking = doc.data() || {};
+        const status = String(booking.status || "booked").toLowerCase();
+        const duration = Math.max(1, Number(booking.durationMinutes || booking.slotMinutes || 50));
+        const lessonEnd = getBookingSlotMs(booking.slot) + duration * 60000;
+        if (!booking.studentUid || booking.isFreeTrial === true || booking.balanceChargedAt || booking.balanceCharged === true) return;
+        if (["canceled", "completed"].includes(status) || lessonEnd <= now) return;
+        if (!byStudent.has(booking.studentUid)) byStudent.set(booking.studentUid, []);
+        byStudent.get(booking.studentUid).push(doc.ref);
+    });
+
+    let normalizedBookings = 0;
+    for (const [studentUid, bookingRefs] of byStudent.entries()) {
+        const entitlementRef = window.db.collection("studentEntitlements").doc(studentUid);
+        const normalizedForStudent = await window.db.runTransaction(async (transaction) => {
+            const entitlementSnap = await transaction.get(entitlementRef);
+            if (!entitlementSnap.exists) return;
+            const bookingSnaps = await Promise.all(bookingRefs.map((ref) => transaction.get(ref)));
+            let activeReservations = 0;
+            const missingReservationState = [];
+            bookingSnaps.forEach((bookingSnap) => {
+                if (!bookingSnap.exists) return;
+                const booking = bookingSnap.data() || {};
+                const status = String(booking.status || "booked").toLowerCase();
+                const duration = Math.max(1, Number(booking.durationMinutes || booking.slotMinutes || 50));
+                const lessonEnd = getBookingSlotMs(booking.slot) + duration * 60000;
+                if (booking.isFreeTrial === true || booking.balanceChargedAt || booking.balanceCharged === true) return;
+                if (["canceled", "completed"].includes(status) || lessonEnd <= Date.now()) return;
+                const reservationStatus = String(booking.reservationStatus || "");
+                if (["released", "consumed", "refunded", "not-required"].includes(reservationStatus)) return;
+                activeReservations += 1;
+                if (!["reserved", "pending-late-consumption"].includes(reservationStatus)) {
+                    missingReservationState.push(bookingSnap.ref);
+                }
+            });
+            const currentReserved = Math.max(0, Number(entitlementSnap.data()?.reservedLessonCredits || 0));
+            transaction.set(entitlementRef, {
+                reservedLessonCredits: Math.max(currentReserved, activeReservations),
+                entitlementUpdatedAt: Date.now(),
+            }, { merge: true });
+            missingReservationState.forEach((ref) => transaction.set(ref, {
+                reservationStatus: "reserved",
+                reservedAt: Date.now(),
+                updatedAt: Date.now(),
+            }, { merge: true }));
+            return missingReservationState.length;
+        });
+        normalizedBookings += Number(normalizedForStudent || 0);
+    }
+    await markerRef.set({ completed: true, completedAt: Date.now(), bookingsNormalized: normalizedBookings });
+    return normalizedBookings;
+}
+
 async function rotateFuturePricingVersions(defaultPrice) {
     const [accountingSnap, entitlementSnap] = await Promise.all([
         window.db.collection("studentAccounting").get(),
@@ -8845,6 +8908,10 @@ async function handleAuthState(user) {
     await migrateLegacyFinancialPrivacy();
     await migrateConsumptionDueAt();
     await normalizeCanceledFreeTrialConsumption();
+    const normalizedLegacyReservations = await reconcileLegacyFutureReservations();
+    if (normalizedLegacyReservations > 0) {
+        console.info(`Reserved ${normalizedLegacyReservations} legacy future lesson${normalizedLegacyReservations === 1 ? "" : "s"} without charging the student.`);
+    }
     const repairedLegacyLessons = await repairLegacyFailedConsumption();
     if (repairedLegacyLessons > 0) {
         console.info(`Re-queued ${repairedLegacyLessons} legacy lesson${repairedLegacyLessons === 1 ? "" : "s"} for safe one-time consumption.`);
