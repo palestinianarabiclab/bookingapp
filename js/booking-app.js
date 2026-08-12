@@ -6909,7 +6909,6 @@ async function reconcileLegacyFutureReservations() {
             }, { merge: true });
             missingReservationState.forEach((ref) => transaction.set(ref, {
                 reservationStatus: "reserved",
-                reservedAt: Date.now(),
                 updatedAt: Date.now(),
             }, { merge: true }));
             return missingReservationState.length;

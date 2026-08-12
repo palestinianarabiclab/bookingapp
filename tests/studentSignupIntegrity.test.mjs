@@ -40,6 +40,7 @@ test("legacy future lessons are reserved once without consuming money or credits
     assert.match(repair, /legacyFutureReservationsV1/);
     assert.match(repair, /reservedLessonCredits: Math\.max\(currentReserved, activeReservations\)/);
     assert.match(repair, /reservationStatus: "reserved"/);
+    assert.doesNotMatch(repair, /reservedAt:/);
     assert.doesNotMatch(repair, /lessonCredits:/);
     assert.doesNotMatch(repair, /balance:/);
 });
