@@ -6685,7 +6685,10 @@ async function migrateLegacyStudentFinancialData(userDocs, accounting, entitleme
             const existingEntitlement = entitlements.get(doc.id) || {};
             const defaultPrice = validPrice(getConfiguredLessonPrice());
             const customPrice = validPrice(existingAccounting.customLessonPrice ?? data.lessonPrice);
-            const version = String(existingEntitlement.pricingVersion || `legacy_${doc.id}_${Date.now()}`);
+            // Every migrated student gets a new immutable snapshot. Reusing
+            // "unconfigured" or an existing version would turn this create into
+            // a forbidden pricingSnapshots update.
+            const version = `legacy_migration_${doc.id}_${Date.now()}`;
             const snapshot = resolvePriceSnapshot({ defaultPrice, customPrice, version });
             batch.set(window.db.collection("studentAccounting").doc(doc.id), {
                 studentUid: doc.id,
@@ -6706,7 +6709,7 @@ async function migrateLegacyStudentFinancialData(userDocs, accounting, entitleme
             if (snapshot) batch.set(window.db.collection("pricingSnapshots").doc(snapshot.version), { studentUid: doc.id, ...snapshot });
             const deletions = {};
             privateKeys.forEach((key) => { if (Object.prototype.hasOwnProperty.call(data, key)) deletions[key] = window.firebase.firestore.FieldValue.delete(); });
-            batch.update(doc.ref, deletions);
+            if (Object.keys(deletions).length) batch.update(doc.ref, deletions);
         });
         await batch.commit();
     }

@@ -44,3 +44,12 @@ test("legacy future lessons are reserved once without consuming money or credits
     assert.doesNotMatch(repair, /lessonCredits:/);
     assert.doesNotMatch(repair, /balance:/);
 });
+
+test("legacy financial migration creates a unique immutable price snapshot per student", () => {
+    const start = app.indexOf("async function migrateLegacyStudentFinancialData");
+    const end = app.indexOf("async function migrateLegacyFinancialPrivacy", start);
+    const migration = app.slice(start, end);
+    assert.match(migration, /`legacy_migration_\$\{doc\.id\}_\$\{Date\.now\(\)\}`/);
+    assert.doesNotMatch(migration, /String\(existingEntitlement\.pricingVersion/);
+    assert.match(migration, /if \(Object\.keys\(deletions\)\.length\) batch\.update/);
+});
