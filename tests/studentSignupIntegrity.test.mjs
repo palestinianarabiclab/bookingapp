@@ -53,3 +53,13 @@ test("legacy financial migration creates a unique immutable price snapshot per s
     assert.doesNotMatch(migration, /String\(existingEntitlement\.pricingVersion/);
     assert.match(migration, /if \(Object\.keys\(deletions\)\.length\) batch\.update/);
 });
+
+test("consumption refund records the provided student id and remains idempotent", () => {
+    const start = app.indexOf("async function refundBookingConsumption");
+    const end = app.indexOf("async function openStudentLessonsModal", start);
+    const refund = app.slice(start, end);
+    assert.match(refund, /if \(operationSnap\.exists\) return/);
+    assert.match(refund, /studentUid: studentId/);
+    assert.doesNotMatch(refund, /studentUid, bookingId/);
+    assert.match(refund, /booking\.studentUid && booking\.studentUid !== studentId/);
+});

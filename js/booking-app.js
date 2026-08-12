@@ -6567,6 +6567,9 @@ async function refundBookingConsumption(studentId, bookingId) {
         const booking = bookingSnap.data() || {};
         if (booking.consumptionRefundedAt) return;
         const ledger = ledgerSnap.data() || {};
+        if ((booking.studentUid && booking.studentUid !== studentId) || (ledger.studentUid && ledger.studentUid !== studentId)) {
+            throw new Error("The deduction does not belong to this student account.");
+        }
         const amount = Math.abs(Number(ledger.moneyDelta || 0));
         const lessonCount = Math.abs(Number(ledger.lessonDelta || -1)) || 1;
         if (!(amount > 0)) throw new Error("The historical deduction amount is unavailable.");
@@ -6584,7 +6587,7 @@ async function refundBookingConsumption(studentId, bookingId) {
             reservationStatus: "refunded", consumptionState: "refunded", updatedAt: refundedAt,
             history: window.firebase.firestore.FieldValue.arrayUnion({ at: refundedAt, action: "consumption-refunded", by: "teacher", lessonCount }),
         }, { merge: true });
-        transaction.set(operationRef, { id: operationRef.id, studentUid, bookingId, type: "consumption-refund", balanceDelta: amount, lessonDelta: lessonCount, createdAt: refundedAt, createdBy: state.teacherUser.uid });
+        transaction.set(operationRef, { id: operationRef.id, studentUid: studentId, bookingId, type: "consumption-refund", balanceDelta: amount, lessonDelta: lessonCount, createdAt: refundedAt, createdBy: state.teacherUser.uid });
     });
 }
 
