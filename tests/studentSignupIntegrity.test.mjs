@@ -63,3 +63,28 @@ test("consumption refund records the provided student id and remains idempotent"
     assert.doesNotMatch(refund, /studentUid, bookingId/);
     assert.match(refund, /booking\.studentUid && booking\.studentUid !== studentId/);
 });
+
+test("student lessons modal moves focus before becoming aria-hidden", () => {
+    const start = app.indexOf("function closeStudentLessonsModal");
+    const end = app.indexOf("function renderStudentLessonRecords", start);
+    const close = app.slice(start, end);
+    assert.ok(close.indexOf("studentLessonsModalReturnFocus.focus()") < close.indexOf('setAttribute("aria-hidden", "true")'));
+    assert.match(close, /modal\.inert = true/);
+    const openStart = app.indexOf("async function openStudentLessonsModal");
+    const openEnd = app.indexOf("function confirmStudentCancellation", openStart);
+    const open = app.slice(openStart, openEnd);
+    assert.match(open, /modal\.inert = false/);
+    assert.match(open, /modal\.querySelector\("\.modal__close"\)\?\.focus\(\)/);
+});
+
+test("active students combines registered and uniquely taught students", () => {
+    const start = app.indexOf("function updateTeacherOverviewStats");
+    const end = app.indexOf("function parseProfileCounter", start);
+    const overview = app.slice(start, end);
+    assert.match(overview, /activeStudentsEl\.textContent = getActiveStudentCount\(\)\.toLocaleString\(\)/);
+    assert.doesNotMatch(overview, /Math\.max\(registeredCount, baseStudents/);
+    assert.match(app, /knownStudentKeys/);
+    assert.match(app, /knownPlatformStudentKeys/);
+    assert.match(app, /async function syncPublicStudentCounts/);
+    assert.match(app, /currentRegistered === registeredCount && currentActive === activeCount/);
+});
