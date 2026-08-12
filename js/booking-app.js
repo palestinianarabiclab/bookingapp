@@ -4048,8 +4048,22 @@ function wireStudentActions() {
                     setButtonLoading(els.studentAuthSubmit, false);
                     return;
                 }
-                const cred = await window.auth.createUserWithEmailAndPassword(email, password);
-                newlyCreatedUser = cred.user;
+                let cred;
+                try {
+                    cred = await window.auth.createUserWithEmailAndPassword(email, password);
+                    newlyCreatedUser = cred.user;
+                } catch (signupError) {
+                    const emailAlreadyExists = ["auth/email-already-in-use", "email-already-in-use"].includes(signupError?.code);
+                    if (!emailAlreadyExists) throw signupError;
+                    cred = await window.auth.signInWithEmailAndPassword(email, password);
+                    const existingProfile = await window.db.collection("users").doc(cred.user.uid).get();
+                    if (existingProfile.exists) {
+                        await window.auth.signOut();
+                        throw new Error("This account already exists. Choose Sign In instead.");
+                    }
+                    // Recover an Auth account left behind by the old failed
+                    // atomic profile/entitlement creation flow.
+                }
                 await cred.user.updateProfile({ displayName: name });
                 const signupBatch = window.db.batch();
                 signupBatch.set(window.db.collection("users").doc(cred.user.uid), {

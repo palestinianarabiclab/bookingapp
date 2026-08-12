@@ -16,6 +16,13 @@ test("failed sign-up cleans up an orphaned Firebase Auth account", () => {
     assert.match(app, /await newlyCreatedUser\.delete\(\)\.catch/);
 });
 
+test("an orphaned Auth account can complete its missing student documents", () => {
+    assert.match(app, /auth\/email-already-in-use/);
+    assert.match(app, /signInWithEmailAndPassword\(email, password\)/);
+    assert.match(app, /if \(existingProfile\.exists\)/);
+    assert.match(app, /Recover an Auth account left behind/);
+});
+
 test("legacy failed consumption is re-queued without changing balances directly", () => {
     const start = app.indexOf("async function repairLegacyFailedConsumption");
     const end = app.indexOf("async function rotateFuturePricingVersions", start);
