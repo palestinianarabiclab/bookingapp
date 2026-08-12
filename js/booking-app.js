@@ -1393,7 +1393,12 @@ function startTeacherBookingsListener() {
 
 if (typeof window !== "undefined") {
     window.addEventListener("focus", () => {
-        if (state.teacherRole === "teacher") refreshTeacherCalendarAutomatically({ force: true }).catch(console.error);
+        if (state.teacherRole === "teacher") {
+            refreshTeacherCalendarAutomatically({ force: true }).catch(console.error);
+            if (state.activeTeacherTab === "tab-students" && Date.now() - state.teacherStudentsLastRefreshAt >= 30000) {
+                refreshTeacherStudents().catch((error) => console.warn("Could not refresh newly registered students.", error));
+            }
+        }
     });
     document.addEventListener("visibilitychange", () => {
         if (!document.hidden && state.teacherRole === "teacher") refreshTeacherCalendarAutomatically({ force: true }).catch(console.error);
@@ -4023,6 +4028,7 @@ function wireStudentActions() {
         const password = els.studentPassword?.value || "";
         const name = (els.studentName?.value || "").trim().slice(0, 100);
         const phone = normalizePhoneNumber();
+        let newlyCreatedUser = null;
         try {
             setAppLoading(true, state.studentAuthMode === "signup" ? "Creating account..." : "Signing in...");
             setButtonLoading(
@@ -4043,6 +4049,7 @@ function wireStudentActions() {
                     return;
                 }
                 const cred = await window.auth.createUserWithEmailAndPassword(email, password);
+                newlyCreatedUser = cred.user;
                 await cred.user.updateProfile({ displayName: name });
                 const signupBatch = window.db.batch();
                 signupBatch.set(window.db.collection("users").doc(cred.user.uid), {
@@ -4068,7 +4075,17 @@ function wireStudentActions() {
                 showScreen("student-screen");
             }
         } catch (error) {
-            setStatus(els.studentAuthMsg, error.message || "Student sign-in failed.", "error");
+            if (newlyCreatedUser && state.studentAuthMode === "signup") {
+                await newlyCreatedUser.delete().catch(() => {});
+            }
+            const permissionError = /missing or insufficient permissions|permission-denied/i.test(String(error?.message || ""));
+            setStatus(
+                els.studentAuthMsg,
+                permissionError
+                    ? "The account could not be completed. Please refresh and create it again."
+                    : (error.message || "Student sign-in failed."),
+                "error"
+            );
         } finally {
             setAppLoading(false);
             setButtonLoading(els.studentAuthSubmit, false);
@@ -6783,6 +6800,49 @@ async function normalizeCanceledFreeTrialConsumption() {
     await markerRef.set({ completed: true, completedAt: Date.now(), bookingsUpdated: candidates.length });
 }
 
+async function repairLegacyFailedConsumption() {
+    const failed = await window.db.collection("bookings")
+        .where("consumptionState", "==", "failed")
+        .limit(100)
+        .get();
+    if (failed.empty) return 0;
+    const entitlementCache = new Map();
+    const repairs = [];
+    for (const doc of failed.docs) {
+        const booking = doc.data() || {};
+        if (!booking.studentUid || booking.isFreeTrial === true || booking.balanceChargedAt || booking.balanceCharged) continue;
+        if (!entitlementCache.has(booking.studentUid)) {
+            const entitlement = await window.db.collection("studentEntitlements").doc(booking.studentUid).get();
+            entitlementCache.set(booking.studentUid, entitlement.exists ? (entitlement.data() || {}) : null);
+        }
+        const entitlement = entitlementCache.get(booking.studentUid);
+        const pricingVersion = String(entitlement?.pricingVersion || "");
+        if (!pricingVersion || ["unconfigured", "legacy-unpriced"].includes(pricingVersion)) continue;
+        const status = String(booking.status || "booked").toLowerCase();
+        const canceledAt = Number(booking.canceledAt || 0);
+        const lateCanceled = status === "canceled" && String(booking.canceledBy || "student").toLowerCase() === "student" &&
+            canceledAt > 0 && Number(booking.slot || 0) - canceledAt < STUDENT_CHANGE_CUTOFF_MS;
+        if (status === "canceled" && !lateCanceled) continue;
+        repairs.push({
+            ref: doc.ref,
+            pricingVersion,
+            dueAt: lateCanceled ? canceledAt : getLessonConsumeAfter(booking),
+        });
+    }
+    for (let offset = 0; offset < repairs.length; offset += 200) {
+        const batch = window.db.batch();
+        repairs.slice(offset, offset + 200).forEach((repair) => batch.set(repair.ref, {
+            pricingVersion: repair.pricingVersion,
+            consumptionDueAt: repair.dueAt,
+            consumptionState: "pending",
+            consumptionLastError: "",
+            updatedAt: Date.now(),
+        }, { merge: true }));
+        await batch.commit();
+    }
+    return repairs.length;
+}
+
 async function rotateFuturePricingVersions(defaultPrice) {
     const [accountingSnap, entitlementSnap] = await Promise.all([
         window.db.collection("studentAccounting").get(),
@@ -8771,6 +8831,10 @@ async function handleAuthState(user) {
     await migrateLegacyFinancialPrivacy();
     await migrateConsumptionDueAt();
     await normalizeCanceledFreeTrialConsumption();
+    const repairedLegacyLessons = await repairLegacyFailedConsumption();
+    if (repairedLegacyLessons > 0) {
+        console.info(`Re-queued ${repairedLegacyLessons} legacy lesson${repairedLegacyLessons === 1 ? "" : "s"} for safe one-time consumption.`);
+    }
     renderPreplyStatisticsSummary(teacherData.calendarStatistics || {});
     if (els.teacherAppsScriptUrl) els.teacherAppsScriptUrl.value = teacherData.appsScript?.webAppUrl || "";
     if (els.teacherPreplyCalendarId) {

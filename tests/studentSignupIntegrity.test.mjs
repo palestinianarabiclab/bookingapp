@@ -1,0 +1,27 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+
+const rules = fs.readFileSync(new URL("../firestore.rules", import.meta.url), "utf8");
+const app = fs.readFileSync(new URL("../js/booking-app.js", import.meta.url), "utf8");
+
+test("student profile and entitlement can be created atomically", () => {
+    const entitlementRules = rules.slice(rules.indexOf("match /studentEntitlements/{uid}"), rules.indexOf("match /studentAccounting/{uid}"));
+    assert.match(entitlementRules, /getAfter\(userDocPath\(uid\)\)/);
+    assert.doesNotMatch(entitlementRules, /get\(userDocPath\(uid\)\)/);
+});
+
+test("failed sign-up cleans up an orphaned Firebase Auth account", () => {
+    assert.match(app, /let newlyCreatedUser = null/);
+    assert.match(app, /await newlyCreatedUser\.delete\(\)\.catch/);
+});
+
+test("legacy failed consumption is re-queued without changing balances directly", () => {
+    const start = app.indexOf("async function repairLegacyFailedConsumption");
+    const end = app.indexOf("async function rotateFuturePricingVersions", start);
+    const repair = app.slice(start, end);
+    assert.match(repair, /consumptionState: "pending"/);
+    assert.match(repair, /pricingVersion: repair\.pricingVersion/);
+    assert.doesNotMatch(repair, /lessonCredits:/);
+    assert.doesNotMatch(repair, /balance:/);
+});

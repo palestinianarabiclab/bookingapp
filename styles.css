@@ -275,6 +275,47 @@ main.site-shell {
     display: grid;
 }
 
+@media (max-width: 640px) {
+    #studentAuthModal {
+        align-items: flex-end;
+    }
+
+    #studentAuthModal .modal__body {
+        width: 100%;
+        max-height: 94dvh;
+        margin: 0;
+        padding: 22px 18px max(22px, env(safe-area-inset-bottom));
+        border-radius: 24px 24px 0 0;
+        overscroll-behavior: contain;
+    }
+
+    #studentAuthModal .student-auth-toggle {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        position: sticky;
+        top: -22px;
+        z-index: 2;
+        padding: 10px 0;
+        background: var(--surface-strong);
+    }
+
+    #studentAuthModal .phone-row {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    #studentAuthModal input,
+    #studentAuthModal select,
+    #studentAuthModal button {
+        min-height: 48px;
+        font-size: 16px;
+    }
+
+    #studentAuthModal .action-row {
+        display: grid;
+        grid-template-columns: 1fr;
+    }
+}
+
 .teacher-banner {
     border-radius: 30px;
     padding: 26px 28px;

@@ -32,3 +32,9 @@ test("unchanged Calendar mirrors do not create recurring Firestore writes", () =
     assert.match(source, /includeSecondMonth \? 60 : 31/);
     assert.match(source, /CALENDAR_EXTENDED_RECONCILE_AT/);
 });
+
+test("legacy bookings reuse the student's authoritative pricing snapshot", () => {
+    assert.match(source, /pricingVersion = fsString_\(entitlement, 'pricingVersion'\)/);
+    assert.match(source, /bookingFields\.pricingVersion = firestoreValue_\(pricingVersion\)/);
+    assert.match(source, /lessonTransactions\/booking_/);
+});

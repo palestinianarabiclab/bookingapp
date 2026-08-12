@@ -894,7 +894,7 @@ function consumeOneBookingAdmin_(config, candidate, now) {
       return { consumed: false, reason: 'already-consumed' };
     }
     const studentUid = fsString_(booking, 'studentUid');
-    const pricingVersion = fsString_(booking, 'pricingVersion');
+    let pricingVersion = fsString_(booking, 'pricingVersion');
     if (fsBool_(booking, 'isFreeTrial')) {
       const fields = cloneFirestoreFields_(booking);
       fields.consumptionDueAt = firestoreValue_(null);
@@ -902,7 +902,7 @@ function consumeOneBookingAdmin_(config, candidate, now) {
       firestoreAdminFetch_(config, ':commit', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ transaction: transaction, writes: [firestoreWriteExisting_(booking, fields)] }) });
       return { consumed: false, reason: 'free-trial' };
     }
-    if (!studentUid || !pricingVersion || pricingVersion === 'legacy-unpriced') {
+    if (!studentUid) {
       const fields = cloneFirestoreFields_(booking);
       fields.consumptionDueAt = firestoreValue_(null);
       fields.consumptionState = firestoreValue_('failed');
@@ -912,12 +912,10 @@ function consumeOneBookingAdmin_(config, candidate, now) {
     }
     const accountingName = firestoreDocumentName_(config, 'studentAccounting/' + studentUid);
     const entitlementName = firestoreDocumentName_(config, 'studentEntitlements/' + studentUid);
-    const pricingName = firestoreDocumentName_(config, 'pricingSnapshots/' + pricingVersion);
     const ledgerName = firestoreDocumentName_(config, 'lessonTransactions/booking_' + bookingId + '_consume');
-    const rows = firestoreBatchGetAdmin_(config, [accountingName, entitlementName, pricingName, ledgerName], transaction);
+    const rows = firestoreBatchGetAdmin_(config, [accountingName, entitlementName, ledgerName], transaction);
     const accounting = batchGetFound_(rows, accountingName);
     const entitlement = batchGetFound_(rows, entitlementName);
-    const pricing = batchGetFound_(rows, pricingName);
     const ledger = batchGetFound_(rows, ledgerName);
     if (ledger) {
       const fields = cloneFirestoreFields_(booking);
@@ -926,7 +924,20 @@ function consumeOneBookingAdmin_(config, candidate, now) {
       firestoreAdminFetch_(config, ':commit', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ transaction: transaction, writes: [firestoreWriteExisting_(booking, fields)] }) });
       return { consumed: false, reason: 'ledger-exists' };
     }
-    if (!accounting || !entitlement || !pricing) throw new Error('Missing accounting, entitlement, or pricing snapshot for ' + bookingId + '.');
+    if (!accounting || !entitlement) throw new Error('Missing accounting or entitlement for ' + bookingId + '.');
+    if (!pricingVersion || pricingVersion === 'legacy-unpriced') pricingVersion = fsString_(entitlement, 'pricingVersion');
+    if (!pricingVersion || pricingVersion === 'legacy-unpriced' || pricingVersion === 'unconfigured') {
+      const fields = cloneFirestoreFields_(booking);
+      fields.consumptionDueAt = firestoreValue_(null);
+      fields.consumptionState = firestoreValue_('failed');
+      fields.consumptionLastError = firestoreValue_('Missing historical and student pricing snapshot.');
+      firestoreAdminFetch_(config, ':commit', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ transaction: transaction, writes: [firestoreWriteExisting_(booking, fields)] }) });
+      return { consumed: false, reason: 'missing-accounting' };
+    }
+    const pricingName = firestoreDocumentName_(config, 'pricingSnapshots/' + pricingVersion);
+    const pricingRows = firestoreBatchGetAdmin_(config, [pricingName], transaction);
+    const pricing = batchGetFound_(pricingRows, pricingName);
+    if (!pricing) throw new Error('Missing pricing snapshot for ' + bookingId + '.');
     const lessonPrice = fsNumber_(pricing, 'effectivePrice');
     if (!(lessonPrice > 0)) throw new Error('Invalid historical lesson price for ' + bookingId + '.');
     const status = fsString_(booking, 'status') || 'booked';
@@ -963,6 +974,7 @@ function consumeOneBookingAdmin_(config, candidate, now) {
     bookingFields.consumptionDueAt = firestoreValue_(null);
     bookingFields.consumptionState = firestoreValue_('consumed');
     bookingFields.consumptionLastError = firestoreValue_('');
+    bookingFields.pricingVersion = firestoreValue_(pricingVersion);
     bookingFields.updatedAt = firestoreValue_(now);
     appendFirestoreArrayValue_(bookingFields, 'history', firestoreValue_({ at: now, action: 'lesson-consumed', by: 'system', reason: reason }));
     const ledgerFields = {
