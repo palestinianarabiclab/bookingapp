@@ -4852,3 +4852,10 @@ main.site-shell {
 .student-credit-metrics .is-available small,
 .student-credit-metrics .is-available strong { color: #fff; }
 .student-credit-metrics .is-empty { background: rgba(100, 116, 139, 0.1); }
+.student-admin-editor__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
