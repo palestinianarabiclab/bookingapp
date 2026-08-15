@@ -94,6 +94,11 @@ test("completed legacy bookings remain eligible after lesson end", () => {
     assert.equal(isConsumptionEligible(booking, getLessonConsumeAfter(booking)), true);
 });
 
+test("teacher-completed lesson becomes consumable immediately", () => {
+    const booking = { slot: 9_000_000, durationMinutes: 50, status: "completed", isFreeTrial: false };
+    assert.equal(isConsumptionEligible(booking, 1_000_000), true);
+});
+
 test("consumed and canceled bookings cannot be consumed again", () => {
     const base = { slot: 1_000_000, durationMinutes: 50, isFreeTrial: false };
     assert.equal(isConsumptionEligible({ ...base, status: "booked", balanceChargedAt: 2_000_000 }, 9_000_000), false);

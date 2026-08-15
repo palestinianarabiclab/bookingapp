@@ -3836,15 +3836,19 @@ function sendWhatsAppReminder(booking) {
 
 async function markBookingCompleted(bookingId, booking) {
     if (!window.db) return;
+    const completedAt = Date.now();
     await window.db.collection("bookings").doc(bookingId).set({
         status: "completed",
-        completedAt: Date.now(),
-        updatedAt: Date.now()
+        completedAt,
+        consumeAfter: completedAt,
+        consumptionDueAt: booking?.isFreeTrial === true ? null : completedAt,
+        consumptionState: booking?.isFreeTrial === true ? "not-required" : "pending",
+        updatedAt: completedAt
     }, { merge: true });
 
     await window.db.collection("publicBookings").doc(bookingId).set({
         status: "completed",
-        updatedAt: Date.now()
+        updatedAt: completedAt
     }, { merge: true });
 
     // Auto-increment hours taught in profile settings
@@ -3858,6 +3862,7 @@ async function markBookingCompleted(bookingId, booking) {
     saveLocalProfileSettings("teacher_profile_v1", state.profileSettings);
     await saveCloudProfileSettings(window.db, state.profileSettings);
     renderProfileUi();
+    await reconcileStudentBalances();
 }
 
 function wireStudentActions() {
@@ -6554,10 +6559,29 @@ function renderStudentLessonRecords(rows, className) {
         const consumptionHealth = booking.consumptionState === "failed" || booking.consumptionState === "retrying"
             ? ` | Consumption: ${booking.consumptionState} (${booking.consumptionLastError || "unknown error"})` : "";
         const detail = `${booking.isFreeTrial ? "Free trial" : `${duration} minutes | ${status}`} | Booking ID: ${booking.id || "legacy"} | Student email: ${emailState}${priceDetail}${consumptionHealth}`;
-        const refundButton = accounting && !booking.consumptionRefundedAt
-            ? `<button type="button" class="btn btn--outline btn--small" data-refund-consumption="${escapeHtml(booking.id)}" data-student-id="${escapeHtml(booking.studentUid || "")}">Refund this deduction</button>` : "";
-        return `<div class="student-lesson-record ${className}"><strong>${escapeHtml(dateLabel)}</strong><span>${escapeHtml(detail)}</span>${refundButton}</div>`;
+        const refundButton = booking.consumptionRefundedAt
+            ? `<span class="student-lesson-record__refunded">Refunded ${escapeHtml(formatSlotTime(booking.consumptionRefundedAt))}</span>`
+            : accounting ? `<button type="button" class="btn btn--outline btn--small student-lesson-record__refund" data-refund-consumption="${escapeHtml(booking.id)}" data-student-id="${escapeHtml(booking.studentUid || "")}">Refund this deduction</button>` : "";
+        return `<article class="student-lesson-record ${className}"><div class="student-lesson-record__heading"><strong>${escapeHtml(dateLabel)}</strong><span class="student-lesson-record__status">${escapeHtml(status)}</span></div><span>${escapeHtml(booking.isFreeTrial ? "Free trial" : `${duration} minutes`)}</span><dl class="student-lesson-record__details"><div><dt>Booking</dt><dd>${escapeHtml(booking.id || "legacy")}</dd></div><div><dt>Accounting</dt><dd>${escapeHtml(detail)}</dd></div></dl>${refundButton}</article>`;
     }).join("");
+}
+
+function renderStudentFinancialHistory(accountingTransactions = [], lessonTransactions = []) {
+    const rows = accountingTransactions.map((entry) => ({ id: String(entry.id || ""), at: Number(entry.at || entry.createdAt || 0), amount: Number(entry.amount || 0), lessonDelta: Number(entry.lessonDelta || entry.lessonCreditAdjustment || 0), description: String(entry.description || "Balance adjustment"), balanceAfter: Number.isFinite(Number(entry.newBalance)) ? Number(entry.newBalance) : null }));
+    const known = new Set(rows.map((row) => row.id).filter(Boolean));
+    lessonTransactions.forEach((entry) => {
+        const id = String(entry.id || "");
+        if (!id || known.has(id)) return;
+        rows.push({ id, at: Number(entry.createdAt || entry.at || 0), amount: Number(entry.moneyDelta || 0), lessonDelta: Number(entry.lessonDelta || 0), description: String(entry.type || "") === "refund" ? "Lesson deduction refunded" : "Lesson completed / balance deducted", balanceAfter: null });
+    });
+    rows.sort((a, b) => b.at - a.at);
+    if (!rows.length) return '<div class="small-note">No financial activity recorded yet.</div>';
+    return `<div class="student-financial-timeline">${rows.map((row) => {
+        const modifier = row.amount > 0 || row.lessonDelta > 0 ? "is-credit" : row.amount < 0 || row.lessonDelta < 0 ? "is-debit" : "is-neutral";
+        const money = row.amount ? `${row.amount > 0 ? "+" : "-"}${formatMoney(Math.abs(row.amount))}` : "";
+        const lessons = row.lessonDelta ? `${row.lessonDelta > 0 ? "+" : ""}${row.lessonDelta} lesson${Math.abs(row.lessonDelta) === 1 ? "" : "s"}` : "";
+        return `<div class="student-financial-entry ${modifier}"><div><strong>${escapeHtml(row.description)}</strong><time>${row.at ? escapeHtml(formatSlotTime(row.at)) : "Date unavailable"}</time></div><div class="student-financial-entry__amount">${escapeHtml([money, lessons].filter(Boolean).join(" · ") || "Recorded")}${row.balanceAfter !== null ? `<small>Balance after: ${escapeHtml(formatMoney(row.balanceAfter))}</small>` : ""}</div></div>`;
+    }).join("")}</div>`;
 }
 
 function getBookingSlotMs(value) {
@@ -6670,7 +6694,9 @@ async function openStudentLessonsModal(student) {
         const auditText = duplicateTransactions.length
             ? `Duplicate deduction records detected: ${duplicateTransactions.map(([id, count]) => `${id} × ${count}`).join(", ")}`
             : `No duplicate deterministic deduction IDs found. Ledger deductions: ${snapshots[1].size}; financial charge entries: ${financialEntries.length}.`;
-        content.innerHTML = `<div class="student-lessons-summary"><div><strong>${upcoming.length}</strong><span>Upcoming</span></div><div><strong>${taken.length}</strong><span>Taken</span></div><div><strong>${canceled.length}</strong><span>Canceled</span></div><div><strong>${Number(entitlement.lessonCredits || 0)}</strong><span>Owned lessons</span></div><div><strong>${Number(entitlement.reservedLessonCredits || 0)}</strong><span>Reserved</span></div><div><strong>${availableLessons}</strong><span>Available</span></div></div><p class="${auditClass}">${escapeHtml(auditText)}</p><p class="small-note">Teacher-only money balance: ${escapeHtml(formatMoney(studentAccounting.balance))}. Each lesson below shows its Booking ID, ledger ID, deduction reason, price snapshot, and consumption time.</p><div class="student-lessons-groups"><section class="student-lessons-group"><h4>Upcoming Lessons</h4>${renderStudentLessonRecords(upcoming, "")}</section><section class="student-lessons-group"><h4>Taken Lessons</h4>${renderStudentLessonRecords(taken, "student-lesson-record--taken")}</section><section class="student-lessons-group"><h4>Canceled Lessons</h4>${renderStudentLessonRecords(canceled, "student-lesson-record--canceled")}</section></div>`;
+        const lessonLedgerRows = [];
+        snapshots[1].forEach((doc) => lessonLedgerRows.push({ id: doc.id, ...(doc.data() || {}) }));
+        content.innerHTML = `<div class="student-lessons-summary"><div><strong>${upcoming.length}</strong><span>Upcoming</span></div><div><strong>${taken.length}</strong><span>Taken</span></div><div><strong>${canceled.length}</strong><span>Canceled</span></div><div><strong>${Number(entitlement.lessonCredits || 0)}</strong><span>Owned lessons</span></div><div><strong>${Number(entitlement.reservedLessonCredits || 0)}</strong><span>Reserved</span></div><div><strong>${availableLessons}</strong><span>Available</span></div></div><p class="${auditClass}">${escapeHtml(auditText)}</p><section class="student-financial-history"><div class="student-financial-history__head"><div><span>Financial record</span><h4>Balance & lesson activity</h4></div><small>Credits, payments, deductions and refunds with their recorded dates. Current balance: ${escapeHtml(formatMoney(studentAccounting.balance))}</small></div>${renderStudentFinancialHistory(Array.isArray(studentAccounting.transactions) ? studentAccounting.transactions : [], lessonLedgerRows)}</section><div class="student-lessons-groups"><section class="student-lessons-group"><h4>Upcoming Lessons</h4>${renderStudentLessonRecords(upcoming, "")}</section><section class="student-lessons-group"><h4>Taken Lessons</h4>${renderStudentLessonRecords(taken, "student-lesson-record--taken")}</section><section class="student-lessons-group"><h4>Canceled Lessons</h4>${renderStudentLessonRecords(canceled, "student-lesson-record--canceled")}</section></div>`;
         content.onclick = async (event) => {
             const button = event.target.closest("[data-refund-consumption]");
             if (!button) return;

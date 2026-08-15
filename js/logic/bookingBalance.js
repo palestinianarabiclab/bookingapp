@@ -62,5 +62,5 @@ export function isConsumptionEligible(booking = {}, now = Date.now()) {
     const status = String(booking.status || "booked").toLowerCase();
     if (booking.isFreeTrial === true || booking.balanceChargedAt || booking.balanceCharged) return false;
     if (!["booked", "rescheduled", "completed"].includes(status)) return false;
-    return getLessonConsumeAfter(booking) <= now;
+    return status === "completed" || getLessonConsumeAfter(booking) <= now;
 }
