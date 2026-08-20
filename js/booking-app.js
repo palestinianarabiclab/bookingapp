@@ -2555,21 +2555,11 @@ async function cancelStudentBooking(bookingId) {
                 at: canceledAt, action: "canceled", by: "student", lateChargeApplies: isLateCancel,
             }),
         }, { merge: true });
-        transaction.set(window.db.collection("publicBookings").doc(bookingId), {
-            status: "canceled", updatedAt: canceledAt, calendarSynced: false,
-        }, { merge: true });
-        getBookingSlotClaimIds(booking.slot, booking.durationMinutes || booking.slotMinutes || 50)
-            .forEach((id) => transaction.delete(window.db.collection("bookingSlotClaims").doc(id)));
         const cancelJobs = [
             createNotificationJob({ bookingId, notificationType: "student-cancellation", recipientType: "teacher", recipientEmail: state.contactSettings?.email || "", version: notificationVersion, createdAt: canceledAt, createdBy: "student", deferInvalid: true }),
             createNotificationJob({ bookingId, notificationType: "student-cancellation", recipientType: "student", recipientEmail: booking.email || state.currentUser?.email || "", version: notificationVersion, createdAt: canceledAt, createdBy: "student" }),
         ];
-        cancelJobs.forEach((job) => transaction.set(window.db.collection("notificationJobs").doc(job.id), job));
-        transaction.set(bookingRef, {
-            studentNotificationStatus: cancelJobs[1].state,
-            studentNotificationAttempts: 0,
-            studentNotificationLastError: cancelJobs[1].lastError,
-        }, { merge: true });
+        booking.cancellationNotificationJobs = cancelJobs;
         const releasablePaidReservation = booking.isFreeTrial !== true && !booking.balanceChargedAt && !booking.balanceCharged &&
             !["released", "consumed", "not-required"].includes(String(booking.reservationStatus || ""));
         if (!isLateCancel && releasablePaidReservation && entitlementSnap.exists) {
@@ -2580,6 +2570,44 @@ async function cancelStudentBooking(bookingId) {
         // next booking look like a brand-new free-trial booking again.
     });
     if (alreadyCanceled) return { calendarDeletePending: booking.calendarDeletePending === true };
+
+    // Old bookings may not have public mirrors or slot claims. Those secondary
+    // records must never roll back the authoritative cancellation and credit
+    // release transaction above.
+    try {
+        const publicRef = window.db.collection("publicBookings").doc(bookingId);
+        const claimRefs = getBookingSlotClaimIds(booking.slot, booking.durationMinutes || booking.slotMinutes || 50)
+            .map((id) => window.db.collection("bookingSlotClaims").doc(id));
+        const [publicSnap, ...claimSnaps] = await Promise.all([
+            publicRef.get(),
+            ...claimRefs.map((ref) => ref.get()),
+        ]);
+        const cleanupBatch = window.db.batch();
+        if (publicSnap.exists) {
+            cleanupBatch.set(publicRef, { status: "canceled", updatedAt: canceledAt, calendarSynced: false }, { merge: true });
+        }
+        claimSnaps.forEach((snap) => { if (snap.exists) cleanupBatch.delete(snap.ref); });
+        await cleanupBatch.commit();
+    } catch (error) {
+        console.warn("Cancellation saved; availability mirrors will be reconciled later.", error);
+    }
+
+    try {
+        const cancelJobs = booking.cancellationNotificationJobs || [];
+        if (cancelJobs.length) {
+            const notificationBatch = window.db.batch();
+            cancelJobs.forEach((job) => notificationBatch.set(window.db.collection("notificationJobs").doc(job.id), job));
+            notificationBatch.set(bookingRef, {
+                studentNotificationStatus: cancelJobs[1]?.state || "pending",
+                studentNotificationAttempts: 0,
+                studentNotificationLastError: cancelJobs[1]?.lastError || "",
+            }, { merge: true });
+            await notificationBatch.commit();
+        }
+    } catch (error) {
+        console.warn("Cancellation saved, but its notification job could not be queued.", error);
+    }
+
     let calendarDeletePending = true;
     if ((booking.googleCalendarEventId || bookingId) && typeof window.deleteBookingViaAppsScript === "function") {
         const result = await window.deleteBookingViaAppsScript({
