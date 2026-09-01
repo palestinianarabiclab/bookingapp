@@ -7078,6 +7078,8 @@ async function refreshTeacherStudents() {
             const requestedPkg = student.requestedPackage || "Lesson Package";
             const requestedAmt = Number(student.requestedAmount || 0);
             const requestedLessons = Number(student.requestedLessons || 0);
+            const packageRepairNeeded = shouldShowPackageCreditRepair(student);
+            const creditedPackageLessons = getApprovedPackageCreditedLessons(student);
             const reviewRequested = student.reviewRequested === true;
             const hasSubmittedReview = student.hasSubmittedReview === true;
             const reviewStatus = hasSubmittedReview
@@ -7114,6 +7116,13 @@ async function refreshTeacherStudents() {
                             <div style="background: #fef3c7; border: 1px solid #f59e0b; color: #92400e; padding: 10px 12px; border-radius: 8px; font-weight: 600; margin-bottom: 12px; font-size: 0.9rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
                                 <span>⚡ Payment Request: <strong>${escapeHtml(requestedPkg)}</strong> ${requestedAmt ? `($${requestedAmt})` : ""}</span>
                                 <button type="button" class="btn btn--primary btn--small" data-quick-credit="${requestedAmt}" data-package-lessons="${requestedLessons}" data-approve-package="true" data-student-id="${escapeHtml(student.id)}" ${requestedAmt > 0 && requestedLessons > 0 ? "" : "disabled"}>Confirm ${requestedLessons} lessons / ${formatMoney(requestedAmt)}</button>
+                            </div>
+                        ` : ""}
+
+                        ${packageRepairNeeded ? `
+                            <div style="background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412; padding: 10px 12px; border-radius: 8px; font-weight: 600; margin-bottom: 12px; font-size: 0.9rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+                                <span>Approved package needs lesson-credit repair: <strong>${escapeHtml(requestedPkg)}</strong> · credited ${creditedPackageLessons}/${requestedLessons}</span>
+                                <button type="button" class="btn btn--outline btn--small" data-student-action="repair-package-credits" data-student-id="${escapeHtml(student.id)}">Repair ${requestedLessons - creditedPackageLessons} lesson${requestedLessons - creditedPackageLessons === 1 ? "" : "s"}</button>
                             </div>
                         ` : ""}
 
@@ -7297,6 +7306,51 @@ async function saveStudentFinance(studentId, balance, lessonPrice, accessData = 
     });
     if (paymentApplied) state.teacherRevenueTotal = Number(state.teacherRevenueTotal ?? 210) + paymentApplied;
     updateTeacherOverviewStats();
+}
+
+function getApprovedPackageCreditedLessons(student = {}) {
+    if (student.paymentStatus !== "approved" || Number(student.requestedLessons || 0) <= 0) return 0;
+    const txs = Array.isArray(student.transactions) ? student.transactions : [];
+    return txs.reduce((total, tx) => {
+        const description = String(tx?.description || "");
+        const isPackage = tx?.type === "package-payment" || description.includes("Package approved") || description.includes("credited");
+        return isPackage ? total + Math.max(0, Math.floor(Number(tx?.lessonCreditAdjustment || tx?.lessonDelta || 0))) : total;
+    }, 0);
+}
+
+function shouldShowPackageCreditRepair(student = {}) {
+    const requestedLessons = Math.max(0, Math.floor(Number(student.requestedLessons || 0)));
+    return student.paymentStatus === "approved"
+        && requestedLessons > 0
+        && getApprovedPackageCreditedLessons(student) < requestedLessons;
+}
+
+async function repairApprovedPackageCredits(studentId, student = {}) {
+    const requestedLessons = Math.max(0, Math.floor(Number(student.requestedLessons || 0)));
+    const alreadyCredited = getApprovedPackageCreditedLessons(student);
+    const missingLessons = Math.max(0, requestedLessons - alreadyCredited);
+    if (!studentId || missingLessons < 1) throw new Error("No missing package lessons were found.");
+    const requestStamp = student.courseAccessRequestedAt?.toMillis?.()
+        || Number(student.courseAccessRequestedAt?.seconds || student.courseAccessRequestedAt || 0)
+        || Number(student.financeUpdatedAt || Date.now());
+    const operationId = `repair_package_lessons_${studentId}_${requestStamp}`;
+    await saveStudentFinance(studentId, student.balance || 0, validPrice(student.customLessonPrice) || "", {
+        courseAccess: student.courseAccess === true,
+        accessType: student.accessType || "manual",
+        paymentStatus: "approved",
+        paymentNote: `Repair approved package lessons: +${missingLessons}`,
+        courseAccessRequested: false,
+        allowOverdraft: student.allowOverdraft === true,
+        reviewRequested: student.reviewRequested === true,
+        lessonCredits: Math.max(0, Number(student.lessonCredits || 0)) + missingLessons,
+        balanceDelta: 0,
+        lessonDelta: missingLessons,
+        totalPaidDelta: 0,
+        paymentAmount: 0,
+        operationId,
+        adjustmentType: "package-credit-repair",
+    });
+    return missingLessons;
 }
 
 async function saveStudentFinanceLegacyUnused(studentId, balance, lessonPrice, accessData = {}) {
@@ -8471,6 +8525,9 @@ function wireTeacherActions() {
             const student = state.studentCache.get(studentId) || {};
             if (!studentId || amount <= 0) { setStatus(els.teacherStudentsMsg, "Enter an amount greater than zero.", "error"); return; }
             const effectivePrice = validPrice(form?.querySelector("[data-student-price]")?.value) || validPrice(state.defaultLessonPrice);
+            const paymentLessons = isPayment && effectivePrice > 0
+                ? Math.max(0, Math.floor((amount + 0.0001) / effectivePrice))
+                : 0;
             const restoredLessons = !isPayment ? refundedLessonCount({ amount, effectivePrice }) : 0;
             if (!isPayment && restoredLessons === null) {
                 setStatus(els.teacherStudentsMsg, `The returned amount must equal a whole number of lessons at ${formatMoney(effectivePrice || 0)} each. You can also set Remaining Lessons directly.`, "error");
@@ -8487,9 +8544,9 @@ function wireTeacherActions() {
                     courseAccessRequested: student.courseAccessRequested === true,
                     allowOverdraft: student.allowOverdraft === true,
                     reviewRequested: student.reviewRequested === true,
-                    lessonCredits: !isPayment ? Math.max(0, Number(student.lessonCredits || 0)) + restoredLessons : Number(student.lessonCredits || 0),
+                    lessonCredits: Math.max(0, Number(student.lessonCredits || 0)) + (isPayment ? paymentLessons : restoredLessons),
                     balanceDelta: amount,
-                    lessonDelta: !isPayment ? restoredLessons : 0,
+                    lessonDelta: isPayment ? paymentLessons : restoredLessons,
                     totalPaidDelta: isPayment ? amount : 0,
                     paymentAmount: isPayment ? amount : 0,
                     operationId,
@@ -8497,7 +8554,7 @@ function wireTeacherActions() {
                 });
                 delete balanceActionBtn.dataset.operationId;
                 await refreshTeacherStudents();
-                setStatus(els.teacherStudentsMsg, `${isPayment ? "Payment added" : `Credit returned and ${restoredLessons} lesson${restoredLessons === 1 ? "" : "s"} restored`}. New balance: ${formatMoney(toMoneyValue(student.balance) + amount)}.`, "success");
+                setStatus(els.teacherStudentsMsg, `${isPayment ? `Payment added and ${paymentLessons} lesson${paymentLessons === 1 ? "" : "s"} credited` : `Credit returned and ${restoredLessons} lesson${restoredLessons === 1 ? "" : "s"} restored`}. New balance: ${formatMoney(toMoneyValue(student.balance) + amount)}.`, "success");
             }).catch((error) => setStatus(els.teacherStudentsMsg, error.message || "Could not update balance.", "error"));
             return;
         }
@@ -8506,6 +8563,18 @@ function wireTeacherActions() {
             const item = toggle.closest("[data-student-id]");
             const editor = item?.querySelector("[data-student-editor]");
             if (editor) editor.hidden = !editor.hidden;
+            return;
+        }
+
+        const packageRepairBtn = event.target.closest("[data-student-action='repair-package-credits']");
+        if (packageRepairBtn) {
+            const studentId = packageRepairBtn.dataset.studentId || "";
+            const student = state.studentCache.get(studentId) || {};
+            withButtonLoading(packageRepairBtn, "Repairing...", async () => {
+                const addedLessons = await repairApprovedPackageCredits(studentId, student);
+                await refreshTeacherStudents();
+                setStatus(els.teacherStudentsMsg, `Repaired ${addedLessons} missing package lesson${addedLessons === 1 ? "" : "s"} for ${student.name || student.email || "student"}. No extra payment was added.`, "success");
+            }).catch((error) => setStatus(els.teacherStudentsMsg, error.message || "Could not repair package credits.", "error"));
             return;
         }
 
