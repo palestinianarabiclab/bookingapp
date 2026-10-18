@@ -982,14 +982,17 @@ function updateCourseAccessRequestUi() {
     if (requestBtn) {
         requestBtn.disabled = !signedIn;
         requestBtn.textContent = requested
-            ? "⚡ Request Pending Approval"
-            : "📩 Notify Teacher (Request Credit Addition)";
+            ? "Request Pending Approval (choose another package to replace)"
+            : "Notify Teacher (Request Credit Addition)";
     }
 
     if (msgEl) {
         if (!signedIn) {
             msgEl.textContent = "Sign in first to choose a package and request account credit.";
             msgEl.className = "status-line";
+        } else if (studentProfile.paymentStatus === "canceled") {
+            msgEl.textContent = "The teacher canceled or rejected this payment request. Choose another package and send a new request.";
+            msgEl.className = "status-line status-line--error";
         } else if (availableLessons > 0) {
             msgEl.textContent = `${availableLessons} lesson${availableLessons === 1 ? "" : "s"} available to book.`;
             msgEl.className = "status-line status-line--success";
@@ -1031,6 +1034,19 @@ async function requestFullCourseAccess() {
     if (msgEl) {
         setStatus(msgEl, `✅ Notification sent to teacher for ${pkg.label}! Once verified, your account balance will be credited.`, "success");
     }
+}
+
+async function cancelCourseAccessRequest() {
+    if (!isStudentSignedIn()) throw new Error("Sign in first.");
+    await window.db.collection("users").doc(state.currentUser.uid).set({
+        courseAccessRequested: false,
+        paymentStatus: "canceled",
+        paymentNote: "Payment request canceled by student before approval.",
+        courseAccessUpdatedAt: Date.now(),
+        updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    updateCourseAccessRequestUi();
+    setStatus(document.getElementById("courseAccessRequestMsg"), "Payment request canceled. You can choose a different package and notify the teacher again.", "success");
 }
 
 async function sendPasswordResetLink({ emailInput, statusElement, button }) {
@@ -1458,7 +1474,10 @@ function updateStudentOfferUi() {
         }
     }
 
-    const pkgs = Array.isArray(offers.packages) ? offers.packages : [];
+    const assigned = state.studentProfile?.assignedPackages?.[0] || state.studentProfile?.assignedPackage;
+    const pkgs = assigned && Number(assigned.lessons) > 0 && Number(assigned.price) > 0
+        ? [{ ...assigned, label: assigned.label || assigned.badge || `${assigned.lessons} Lessons ($${assigned.price})`, badge: assigned.badge || assigned.label || "" }]
+        : (Array.isArray(offers.packages) ? offers.packages : []);
     const stillExists = pkgs.some(p => p.lessons === state.selectedPackage?.lessons && p.price === state.selectedPackage?.price);
     if (!stillExists) state.selectedPackage = null;
 
@@ -7112,12 +7131,13 @@ async function refreshTeacherStudents() {
                             <div class="student-admin-editor__actions">
                                 <button class="btn btn--outline btn--small" type="button" data-student-action="send-booking-invitation" data-student-id="${escapeHtml(student.id)}">Send Lesson Invitation</button>
                                 <button class="btn btn--outline btn--small" type="button" data-student-action="view-lessons" data-student-id="${escapeHtml(student.id)}">View Lessons & deductions</button>
+                                <button class="btn btn--outline btn--small" type="button" data-student-action="edit-package" data-student-id="${escapeHtml(student.id)}">Edit Package</button>
                             </div>
                         </div>
                         ${accessRequested ? `
                             <div style="background: #fef3c7; border: 1px solid #f59e0b; color: #92400e; padding: 10px 12px; border-radius: 8px; font-weight: 600; margin-bottom: 12px; font-size: 0.9rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
-                                <span>⚡ Payment Request: <strong>${escapeHtml(requestedPkg)}</strong> ${requestedAmt ? `($${requestedAmt})` : ""}</span>
-                                <button type="button" class="btn btn--primary btn--small" data-quick-credit="${requestedAmt}" data-package-lessons="${requestedLessons}" data-approve-package="true" data-student-id="${escapeHtml(student.id)}" ${requestedAmt > 0 && requestedLessons > 0 ? "" : "disabled"}>Confirm ${requestedLessons} lessons / ${formatMoney(requestedAmt)}</button>
+                                <span>Payment Request: <strong>${escapeHtml(requestedPkg)}</strong> ${requestedAmt && !String(requestedPkg).includes("$") ? `($${requestedAmt})` : ""}</span>
+                                <span style="display:flex; gap:6px; flex-wrap:wrap;"><button type="button" class="btn btn--primary btn--small" data-quick-credit="${requestedAmt}" data-package-lessons="${requestedLessons}" data-approve-package="true" data-student-id="${escapeHtml(student.id)}" ${requestedAmt > 0 && requestedLessons > 0 ? "" : "disabled"}>Confirm ${requestedLessons} lessons / ${formatMoney(requestedAmt)}</button><button type="button" class="btn btn--outline btn--small" data-student-action="cancel-payment-request" data-student-id="${escapeHtml(student.id)}">Cancel request</button></span>
                             </div>
                         ` : ""}
 
@@ -7153,12 +7173,12 @@ async function refreshTeacherStudents() {
 
                         <div class="student-finance-grid">
                             <label class="field student-finance-card student-finance-card--payment">
-                                <span>Payment Received (+$)</span>
+                                <span>Payment Received (+$)<small>Paid money; adds balance and lessons.</small></span>
                                 <input data-student-add-payment type="number" min="0" step="0.01" placeholder="100" />
                                 <button class="btn btn--primary btn--small" type="button" data-student-action="add-payment" data-student-id="${escapeHtml(student.id)}">Add Payment</button>
                             </label>
                             <label class="field student-finance-card student-finance-card--refund">
-                                <span>Return Credit / Refund (+$)</span>
+                                <span>Return Credit / Refund (+$)<small>Returns value without recording a payment.</small></span>
                                 <input data-student-add-refund type="number" min="0" step="0.01" placeholder="10" />
                                 <button class="btn btn--outline btn--small" type="button" data-student-action="add-refund" data-student-id="${escapeHtml(student.id)}">Return Credit</button>
                             </label>
@@ -7279,6 +7299,7 @@ async function saveStudentFinance(studentId, balance, lessonPrice, accessData = 
             paymentStatus: accessData.paymentStatus || "none",
             paymentNote: (accessData.paymentNote || "").trim().slice(0, 300),
             courseAccessRequested: accessData.courseAccess ? false : accessData.courseAccessRequested === true,
+            ...(accessData.assignedPackage ? { assignedPackage: accessData.assignedPackage } : {}),
             courseAccessUpdatedAt: now,
             ...(typeof accessData.reviewRequested !== "undefined" ? { reviewRequested: accessData.reviewRequested === true, reviewRequestedAt: accessData.reviewRequested ? now : null } : {}),
             updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
@@ -8512,7 +8533,61 @@ function wireTeacherActions() {
         }).catch((error) => setStatus(document.getElementById("studentInvitationMsg"), error.message || "Could not send the email.", "error"));
     });
 
+    function openStudentPackageEditor(studentId) {
+        const student = state.studentCache.get(studentId) || {};
+        const publicPackages = Array.isArray(state.bookingSettings?.courseOffers?.packages) ? state.bookingSettings.courseOffers.packages : [];
+        const packages = Array.isArray(student.assignedPackages) && student.assignedPackages.length
+            ? student.assignedPackages : (student.assignedPackage ? [student.assignedPackage] : publicPackages);
+        const modal = document.createElement("div");
+        modal.className = "student-package-modal modal--open";
+        modal.innerHTML = `<div class="student-package-modal__dialog"><button type="button" class="student-package-modal__close" aria-label="Close">×</button><h3>Edit Lesson Packages</h3><p class="small-note">These packages are visible only to ${escapeHtml(student.name || student.email || "this student")}.</p><div class="student-package-modal__rows">${packages.map((pkg) => `<div class="student-package-modal__row"><label>Badge / Discount Label<input data-pkg-label value="${escapeHtml(pkg.label || "")}"></label><label>Lessons<input data-pkg-lessons type="number" min="1" value="${escapeHtml(pkg.lessons || 1)}"></label><label>Price (USD)<input data-pkg-price type="number" min="0.01" step="0.01" value="${escapeHtml(pkg.price || 0)}"></label><label class="student-package-modal__popular">Popular<input data-pkg-popular type="checkbox" ${pkg.popular ? "checked" : ""}></label><button type="button" class="btn btn--danger btn--small" data-pkg-delete>Delete</button></div>`).join("")}</div><div class="student-package-modal__actions"><button type="button" class="btn btn--outline" data-pkg-add>➕ Add New Package</button><button type="button" class="btn btn--primary" data-pkg-save>Save Package</button></div><p class="status-line" data-pkg-msg></p></div>`;
+        document.body.appendChild(modal);
+        const rows = modal.querySelector(".student-package-modal__rows");
+        const addRow = () => { const row = document.createElement("div"); row.className = "student-package-modal__row"; row.innerHTML = `<label>Badge / Discount Label<input data-pkg-label></label><label>Lessons<input data-pkg-lessons type="number" min="1" value="1"></label><label>Price (USD)<input data-pkg-price type="number" min="0.01" step="0.01"></label><label class="student-package-modal__popular">Popular<input data-pkg-popular type="checkbox"></label><button type="button" class="btn btn--danger btn--small" data-pkg-delete>Delete</button>`; rows.appendChild(row); };
+        modal.addEventListener("click", async (event) => {
+            if (event.target.closest(".student-package-modal__close")) modal.remove();
+            if (event.target.closest("[data-pkg-add]")) addRow();
+            if (event.target.closest("[data-pkg-delete]")) event.target.closest(".student-package-modal__row")?.remove();
+            if (event.target.closest("[data-pkg-save]")) {
+                const assignedPackages = [...rows.querySelectorAll(".student-package-modal__row")].map(row => ({ label: row.querySelector("[data-pkg-label]")?.value.trim() || "Lesson Package", lessons: Math.max(1, Number(row.querySelector("[data-pkg-lessons]")?.value || 1)), price: Math.max(0.01, Number(row.querySelector("[data-pkg-price]")?.value || 0)), popular: row.querySelector("[data-pkg-popular]")?.checked === true })).filter(pkg => pkg.price > 0);
+                assignedPackages.forEach(pkg => { pkg.badge = pkg.badge || pkg.label; });
+                if (!assignedPackages.length) return;
+                await window.db.collection("users").doc(studentId).set({ assignedPackages, assignedPackage: assignedPackages[0], updatedAt: window.firebase.firestore.FieldValue.serverTimestamp() }, { merge: true });
+                modal.remove(); await refreshTeacherStudents();
+            }
+        });
+    }
+
     els.teacherStudentsList?.addEventListener("click", (event) => {
+        const editPackageBtn = event.target.closest("[data-student-action='edit-package']");
+        if (editPackageBtn) { openStudentPackageEditor(editPackageBtn.dataset.studentId); return; }
+        const cancelRequestBtn = event.target.closest("[data-student-action='cancel-payment-request']");
+        if (cancelRequestBtn) {
+            const studentId = cancelRequestBtn.dataset.studentId || "";
+            const student = state.studentCache.get(studentId) || {};
+            withButtonLoading(cancelRequestBtn, "Canceling...", async () => {
+                await window.db.collection("users").doc(studentId).set({ courseAccessRequested: false, paymentStatus: "canceled", paymentNote: "Payment request canceled by teacher.", courseAccessUpdatedAt: Date.now(), updatedAt: window.firebase.firestore.FieldValue.serverTimestamp() }, { merge: true });
+                await refreshTeacherStudents();
+                setStatus(els.teacherStudentsMsg, `Payment request canceled for ${student.name || student.email || "student"}.`, "success");
+                return;
+                await saveStudentFinance(studentId, student.balance || 0, validPrice(student.customLessonPrice) || "", {
+                    courseAccess: student.courseAccess === true,
+                    accessType: student.accessType || "none",
+                    paymentStatus: "canceled",
+                    paymentNote: "Payment request canceled by teacher before approval.",
+                    courseAccessRequested: false,
+                    lessonCredits: Number(student.lessonCredits || 0),
+                    balanceDelta: 0,
+                    lessonDelta: 0,
+                    totalPaid: Number(student.totalPaid || 0),
+                    operationId: `cancel_payment_request_${studentId}_${Date.now()}`,
+                    adjustmentType: "cancel-payment-request",
+                });
+                await refreshTeacherStudents();
+                setStatus(els.teacherStudentsMsg, `Payment request canceled for ${student.name || student.email || "student"}.`, "success");
+            }).catch((error) => setStatus(els.teacherStudentsMsg, error.message || "Could not cancel payment request.", "error"));
+            return;
+        }
         const viewLessonsBtn = event.target.closest("[data-student-action='view-lessons']");
         if (viewLessonsBtn) {
             const studentId = viewLessonsBtn.dataset.studentId;
@@ -8592,14 +8667,15 @@ function wireTeacherActions() {
             const currentBalance = Number(student.balance || 0);
             const customLessonPrice = validPrice(student.customLessonPrice);
             const lessonPrice = customLessonPrice || validPrice(getConfiguredLessonPrice());
-            const creditedLessonValue = isPackageApproval ? packageCreditValue({ lessons: packageLessons, effectivePrice: lessonPrice }) : creditAmount;
+            const creditedLessonValue = isPackageApproval ? creditAmount : creditAmount;
+            const packageUnitPrice = isPackageApproval && packageLessons > 0 ? creditAmount / packageLessons : lessonPrice;
             const newBalance = currentBalance + creditedLessonValue;
 
             const requestStamp = student.courseAccessRequestedAt?.toMillis?.() || Number(student.courseAccessRequestedAt?.seconds || student.courseAccessRequestedAt || Date.now());
             const operationId = quickCreditBtn.dataset.operationId || `finance_${studentId}_package_${String(student.requestedPackage || requestedPkg).replace(/[^a-zA-Z0-9_-]/g, "_")}_${requestStamp}`;
             quickCreditBtn.dataset.operationId = operationId;
             withButtonLoading(quickCreditBtn, "Adding...", async () => {
-                await saveStudentFinance(studentId, newBalance, customLessonPrice || "", {
+                await saveStudentFinance(studentId, newBalance, isPackageApproval ? packageUnitPrice : (customLessonPrice || ""), {
                     courseAccess: student.courseAccess === true,
                     accessType: student.accessType || "manual",
                     paymentStatus: "approved",
@@ -8619,6 +8695,7 @@ function wireTeacherActions() {
                     paymentAmount: creditAmount,
                     operationId,
                     adjustmentType: "payment",
+                    assignedPackage: isPackageApproval ? { label: student.requestedPackage || `${packageLessons} Lessons`, lessons: packageLessons, price: creditAmount, unitPrice: packageUnitPrice } : student.assignedPackage,
                 });
                 delete quickCreditBtn.dataset.operationId;
                 await refreshTeacherStudents();
@@ -8759,6 +8836,11 @@ function wireTeacherActions() {
                         allowOverdraft: allowOverdraftChecked,
                         reviewRequested: existingStudent.reviewRequested === true,
                         lessonCredits: Math.max(0, Math.floor(Number(form.querySelector("[data-student-lesson-credits]")?.value || 0))),
+                        assignedPackage: (() => {
+                            const lessons = Math.floor(Number(form.querySelector("[data-student-package-lessons]")?.value || 0));
+                            const price = toMoneyValue(form.querySelector("[data-student-package-price]")?.value);
+                            return lessons > 0 && price > 0 ? { label: (form.querySelector("[data-student-package-label]")?.value || "").trim() || `${lessons} Lessons`, lessons, price, unitPrice: price / lessons } : null;
+                        })(),
                     }
                 );
                 await refreshTeacherStudents();

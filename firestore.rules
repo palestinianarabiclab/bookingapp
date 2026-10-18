@@ -131,6 +131,8 @@ service cloud.firestore {
           'requestedLessons',
           'paymentStatus',
           'paymentNote',
+          'courseAccessUpdatedAt',
+          'assignedPackage',
           'reviewRequested',
           'reviewSubmittedAt',
           'reservedLessonCredits',
@@ -185,6 +187,7 @@ service cloud.firestore {
           'trialUsedAt',
           'courseAccessUpdatedAt',
           'financeUpdatedAt',
+          'assignedPackage',
           'updatedAt'
         ]));
       allow delete: if resource.data.role == "student" &&
