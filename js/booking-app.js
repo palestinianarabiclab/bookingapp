@@ -7144,7 +7144,7 @@ async function refreshTeacherStudents() {
                         ${packageRepairNeeded ? `
                             <div style="background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412; padding: 10px 12px; border-radius: 8px; font-weight: 600; margin-bottom: 12px; font-size: 0.9rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
                                 <span>Approved package needs lesson-credit repair: <strong>${escapeHtml(requestedPkg)}</strong> · credited ${creditedPackageLessons}/${requestedLessons}</span>
-                                <button type="button" class="btn btn--outline btn--small" data-student-action="repair-package-credits" data-student-id="${escapeHtml(student.id)}">Repair ${requestedLessons - creditedPackageLessons} lesson${requestedLessons - creditedPackageLessons === 1 ? "" : "s"}</button>
+                                <span style="display:flex; gap:6px; flex-wrap:wrap;"><button type="button" class="btn btn--outline btn--small" data-student-action="repair-package-credits" data-student-id="${escapeHtml(student.id)}">Repair ${requestedLessons - creditedPackageLessons} lesson${requestedLessons - creditedPackageLessons === 1 ? "" : "s"}</button><button type="button" class="btn btn--ghost btn--small" data-student-action="dismiss-package-repair" data-student-id="${escapeHtml(student.id)}">Mark as reviewed</button></span>
                             </div>
                         ` : ""}
 
@@ -7344,6 +7344,7 @@ function getApprovedPackageCreditedLessons(student = {}) {
 function shouldShowPackageCreditRepair(student = {}) {
     const requestedLessons = Math.max(0, Math.floor(Number(student.requestedLessons || 0)));
     return student.paymentStatus === "approved"
+        && student.packageCreditRepairDismissed !== true
         && requestedLessons > 0
         && getApprovedPackageCreditedLessons(student) < requestedLessons;
 }
@@ -8558,7 +8559,7 @@ function wireTeacherActions() {
         });
     }
 
-    els.teacherStudentsList?.addEventListener("click", (event) => {
+    els.teacherStudentsList?.addEventListener("click", async (event) => {
         const editPackageBtn = event.target.closest("[data-student-action='edit-package']");
         if (editPackageBtn) { openStudentPackageEditor(editPackageBtn.dataset.studentId); return; }
         const cancelRequestBtn = event.target.closest("[data-student-action='cancel-payment-request']");
@@ -8644,6 +8645,14 @@ function wireTeacherActions() {
             return;
         }
 
+        const dismissRepairBtn = event.target.closest("[data-student-action='dismiss-package-repair']");
+        if (dismissRepairBtn) {
+            const studentId = dismissRepairBtn.dataset.studentId || "";
+            await window.db.collection("users").doc(studentId).set({ packageCreditRepairDismissed: true, packageCreditRepairDismissedAt: Date.now(), updatedAt: window.firebase.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            await refreshTeacherStudents();
+            setStatus(els.teacherStudentsMsg, "Package credit warning marked as reviewed. No balance or lesson values were changed.", "success");
+            return;
+        }
         const packageRepairBtn = event.target.closest("[data-student-action='repair-package-credits']");
         if (packageRepairBtn) {
             const studentId = packageRepairBtn.dataset.studentId || "";
