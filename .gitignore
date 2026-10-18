@@ -1,2 +1,13 @@
-# Runtime config is intentionally committed for this static Vercel deployment.
+# Generated deployment output
 public/
+.env
+.env.*
+!.env.example
+.firebase/
+firebase-debug.log
+*.log
+*.local
+service-account*.json
+serviceAccount*.json
+credentials*.json
+*-credentials.json
