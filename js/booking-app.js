@@ -894,9 +894,10 @@ function updateStudentBalanceUi() {
     }
 
     if (els.studentLessonPriceValue) {
-        els.studentLessonPriceValue.textContent = "";
-        els.studentLessonPriceValue.hidden = true;
-        els.studentLessonPriceValue.style.display = "none";
+        const lessonRate = validPrice(state.studentProfile?.lessonUnitPrice);
+        els.studentLessonPriceValue.textContent = lessonRate ? `Your lesson rate: ${formatMoney(lessonRate)}` : "";
+        els.studentLessonPriceValue.hidden = !lessonRate;
+        els.studentLessonPriceValue.style.display = lessonRate ? "block" : "none";
     }
 
     const remainingBadge = document.getElementById("studentRemainingLessonsBadge");
@@ -1456,7 +1457,10 @@ async function loadPublicSettings({ force = false } = {}) {
 function updateStudentOfferUi() {
     const offers = state.bookingSettings.courseOffers || {};
     const lessonPrice = getConfiguredLessonPrice();
-    const rateText = state.profileSettings?.rateText ? `Regular rate: ${state.profileSettings.rateText}` : "Rate set by teacher";
+    const studentLessonPrice = isStudentSignedIn() ? validPrice(state.studentProfile?.lessonUnitPrice) : 0;
+    const rateText = studentLessonPrice
+        ? `Your rate: ${formatMoney(studentLessonPrice)} / lesson`
+        : (state.profileSettings?.rateText ? `Regular rate: ${state.profileSettings.rateText}` : "Rate set by teacher");
     const lessonRateDisplay = document.getElementById("lessonRateDisplay");
     if (lessonRateDisplay) lessonRateDisplay.textContent = rateText;
     if (els.preplyRateDisplay && !state.profileSettings?.rateText) {
@@ -1477,13 +1481,16 @@ function updateStudentOfferUi() {
     const studentPackages = Array.isArray(state.studentProfile?.assignedPackages) && state.studentProfile.assignedPackages.length
         ? state.studentProfile.assignedPackages
         : (state.studentProfile?.assignedPackage ? [state.studentProfile.assignedPackage] : []);
-    const pkgs = studentPackages.length
+    let pkgs = studentPackages.length
         ? studentPackages.filter((pkg) => Number(pkg?.lessons) > 0 && Number(pkg?.price) > 0).map((pkg) => ({
             ...pkg,
             label: pkg.label || pkg.badge || `${pkg.lessons} Lessons ($${pkg.price})`,
             badge: pkg.badge || pkg.label || "",
         }))
         : (Array.isArray(offers.packages) ? offers.packages : []);
+    if (!studentPackages.length && studentLessonPrice > 0 && lessonPrice > 0) {
+        pkgs = pkgs.map((pkg) => ({ ...pkg, price: Math.round((Number(pkg.price || 0) / lessonPrice) * studentLessonPrice * 100) / 100 }));
+    }
     const stillExists = pkgs.some(p => p.lessons === state.selectedPackage?.lessons && p.price === state.selectedPackage?.price);
     if (!stillExists) state.selectedPackage = null;
 
@@ -5631,7 +5638,9 @@ function updateTeacherOverviewStats() {
         headTotalBalanceEl.textContent = formattedTotalBalance;
     }
     if (headTotalStudentsEl) {
-        headTotalStudentsEl.textContent = String(studentList.length || 0);
+        const manualCount = state.profileSettings?.studentsCountManual === true
+            ? String(state.profileSettings?.studentsCount || "").trim() : "";
+        headTotalStudentsEl.textContent = manualCount || String(studentList.length || 0);
     }
 
     renderTeacherUpcomingLessonBanner();
@@ -6358,7 +6367,11 @@ function renderProfileUi() {
     if (els.preplyArabicName) els.preplyArabicName.textContent = "";
     if (els.preplyTeacherHeadline) els.preplyTeacherHeadline.textContent = p.headline || "";
     if (els.preplyHoursBadge) els.preplyHoursBadge.textContent = p.hoursTaught || "1,200+";
-    if (els.preplyStudentsBadge) els.preplyStudentsBadge.textContent = p.activeStudentsCount ?? p.studentsCount ?? "0";
+    if (els.preplyStudentsBadge) {
+        els.preplyStudentsBadge.textContent = p.studentsCountManual === true
+            ? (p.studentsCount || "0")
+            : (p.activeStudentsCount ?? p.studentsCount ?? "0");
+    }
     if (els.preplyQuoteArabic) els.preplyQuoteArabic.textContent = p.quoteArabic ? `"${p.quoteArabic.replace(/^["'«»]|["'«»]$/g, '')}"` : "";
     if (els.preplyBioText) {
         els.preplyBioText.innerHTML = escapeHtml(p.bioText || "").replace(/\n/g, "<br>");
@@ -7298,6 +7311,7 @@ async function saveStudentFinance(studentId, balance, lessonPrice, accessData = 
             defaultPrice: validPrice(getConfiguredLessonPrice()), customPrice: requestedCustomPrice,
             version: `price_${studentId}_${now}`, capturedAt: now,
         }) : null;
+        const effectiveLessonPrice = snapshot?.effectivePrice || validPrice(entitlement.lessonUnitPrice) || requestedCustomPrice || validPrice(getConfiguredLessonPrice());
         transaction.set(userRef, {
             courseAccess: accessData.courseAccess === true,
             accessType: accessData.courseAccess ? (accessData.accessType || "lifetime") : "none",
@@ -7306,6 +7320,7 @@ async function saveStudentFinance(studentId, balance, lessonPrice, accessData = 
             paymentNote: (accessData.paymentNote || "").trim().slice(0, 300),
             courseAccessRequested: accessData.courseAccess ? false : accessData.courseAccessRequested === true,
             ...(accessData.assignedPackage ? { assignedPackage: accessData.assignedPackage } : {}),
+            ...(effectiveLessonPrice ? { lessonUnitPrice: effectiveLessonPrice } : {}),
             courseAccessUpdatedAt: now,
             ...(typeof accessData.reviewRequested !== "undefined" ? { reviewRequested: accessData.reviewRequested === true, reviewRequestedAt: accessData.reviewRequested ? now : null } : {}),
             updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
@@ -7316,6 +7331,7 @@ async function saveStudentFinance(studentId, balance, lessonPrice, accessData = 
             reservedLessonCredits: Math.max(0, Number(entitlement.reservedLessonCredits || 0)),
             allowOverdraft: accessData.allowOverdraft === true,
             pricingVersion: snapshot?.version || String(entitlement.pricingVersion || "legacy-unpriced"),
+            ...(effectiveLessonPrice ? { lessonUnitPrice: effectiveLessonPrice } : {}),
             entitlementUpdatedAt: now,
         }, { merge: true });
         if (snapshot) transaction.set(window.db.collection("pricingSnapshots").doc(snapshot.version), { studentUid: studentId, ...snapshot });
@@ -7855,6 +7871,7 @@ function wireTeacherActions() {
                 ]);
                 await rotateFuturePricingVersions(defaultPrice);
                 renderProfileUi();
+                updateTeacherOverviewStats();
                 updateStudentOfferUi();
                 setStatus(els.teacherProfileMsg, "Profile settings saved successfully!", "success");
             });
