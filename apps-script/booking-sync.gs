@@ -1676,6 +1676,7 @@ function processCalendarSynchronization() {
   let processed = 0;
   let failed = 0;
   let consumptionResult = { consumed: 0, skipped: 0, failed: 0, checked: 0 };
+  let reconciliationSkipped = false;
   try {
     const pendingCreates = queryBookingsAdmin_(config, [{ field: 'calendarSynced', value: false }], 50);
     pendingCreates.forEach(function (doc) {
@@ -1693,14 +1694,44 @@ function processCalendarSynchronization() {
         failed += 1;
       }
     });
-    reconcilePlatformCalendarEvents_(config);
-    consumptionResult = processDueLessonConsumption_(config);
+    // Event reconciliation reads a broad Firestore window. It does not need to
+    // run on every 10-minute retry pass: pending creates/deletes above still do.
+    // Limiting it to hourly avoids repeated full reads and Firestore bandwidth
+    // exhaustion while retaining automatic Calendar-to-platform reconciliation.
+    const properties = PropertiesService.getScriptProperties();
+    const now = Date.now();
+    const lastReconciliation = Number(properties.getProperty('CALENDAR_RECONCILE_LAST_RUN_AT') || 0);
+    if (now - lastReconciliation >= 60 * 60 * 1000) {
+      try {
+        reconcilePlatformCalendarEvents_(config);
+        properties.setProperty('CALENDAR_RECONCILE_LAST_RUN_AT', String(now));
+      } catch (err) {
+        failed += 1;
+        // Record a backoff timestamp so quota errors cannot trigger the same
+        // expensive scan every ten minutes or generate repeated failure email.
+        properties.setProperty('CALENDAR_RECONCILE_LAST_RUN_AT', String(now));
+        console.warn('Calendar reconciliation deferred: ' + String(err && err.message || err));
+      }
+    } else {
+      reconciliationSkipped = true;
+    }
+    try {
+      consumptionResult = processDueLessonConsumption_(config);
+    } catch (err) {
+      failed += 1;
+      console.warn('Lesson consumption deferred: ' + String(err && err.message || err));
+    }
     processed += consumptionResult.consumed;
     failed += consumptionResult.failed;
-    const notificationResult = processPendingNotificationJobs_(config, '');
-    processed += notificationResult.processed;
+    try {
+      const notificationResult = processPendingNotificationJobs_(config, '');
+      processed += notificationResult.processed;
+    } catch (err) {
+      failed += 1;
+      console.warn('Notification processing deferred: ' + String(err && err.message || err));
+    }
   } finally { lock.releaseLock(); }
-  return { success: failed === 0, processed: processed, failed: failed, consumption: consumptionResult, message: 'Calendar, notification, and lesson-consumption background synchronization finished.' };
+  return { success: failed === 0, processed: processed, failed: failed, consumption: consumptionResult, reconciliationSkipped: reconciliationSkipped, message: 'Calendar, notification, and lesson-consumption background synchronization finished.' };
 }
 
 function installCalendarSyncTrigger() {
