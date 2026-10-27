@@ -133,8 +133,6 @@ service cloud.firestore {
           'paymentNote',
           'courseAccessUpdatedAt',
           'assignedPackage',
-          'assignedPackages',
-          'lessonUnitPrice',
           'packageCreditRepairDismissed',
           'packageCreditRepairDismissedAt',
           'reviewRequested',
@@ -192,6 +190,8 @@ service cloud.firestore {
           'courseAccessUpdatedAt',
           'financeUpdatedAt',
           'assignedPackage',
+          'assignedPackages',
+          'lessonUnitPrice',
           'packageCreditRepairDismissed',
           'packageCreditRepairDismissedAt',
           'updatedAt'
