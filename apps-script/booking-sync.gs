@@ -1543,6 +1543,14 @@ function patchCalendarSyncResult_(config, bookingId, values) {
   firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), values);
 }
 
+function isFirestoreQuotaError_(error) {
+  const message = String(error && error.message || error || '').toLowerCase();
+  return message.indexOf('http 429') !== -1 ||
+    message.indexOf('resource_exhausted') !== -1 ||
+    message.indexOf('bandwidth quota') !== -1 ||
+    message.indexOf('quota exceeded') !== -1;
+}
+
 function ensureCalendarEventForFirestoreBooking_(config, doc) {
   const bookingId = firestoreDocId_(doc);
   const slot = fsNumber_(doc, 'slot');
@@ -1672,13 +1680,24 @@ function reconcilePlatformCalendarEvents_(config) {
 function processCalendarSynchronization() {
   const config = getConfig_();
   const lock = LockService.getScriptLock();
-  lock.waitLock(20000);
+  let lockHeld = false;
   let processed = 0;
   let failed = 0;
   let consumptionResult = { consumed: 0, skipped: 0, failed: 0, checked: 0 };
   let reconciliationSkipped = false;
   try {
-    const pendingCreates = queryBookingsAdmin_(config, [{ field: 'calendarSynced', value: false }], 50);
+    lock.waitLock(20000);
+    lockHeld = true;
+    const workerProperties = PropertiesService.getScriptProperties();
+    const backoffUntil = Number(workerProperties.getProperty('CALENDAR_SYNC_WRITE_BACKOFF_UNTIL') || 0);
+    if (backoffUntil > Date.now()) {
+      return {
+        success: true, processed: 0, failed: 0, consumption: consumptionResult,
+        reconciliationSkipped: true,
+        message: 'Calendar synchronization is temporarily paused to protect Firestore write quota.'
+      };
+    }
+    const pendingCreates = queryBookingsAdmin_(config, [{ field: 'calendarSynced', value: false }], 10);
     pendingCreates.forEach(function (doc) {
       ensureLegacyPendingNotificationJobs_(config, doc);
       const bookingId = firestoreDocId_(doc);
@@ -1730,7 +1749,22 @@ function processCalendarSynchronization() {
       failed += 1;
       console.warn('Notification processing deferred: ' + String(err && err.message || err));
     }
-  } finally { lock.releaseLock(); }
+    workerProperties.deleteProperty('CALENDAR_SYNC_WRITE_BACKOFF_UNTIL');
+  } catch (err) {
+    failed += 1;
+    const message = String(err && err.message || err);
+    if (isFirestoreQuotaError_(err)) {
+      PropertiesService.getScriptProperties().setProperty(
+        'CALENDAR_SYNC_WRITE_BACKOFF_UNTIL',
+        String(Date.now() + 30 * 60 * 1000)
+      );
+      console.warn('Firestore write quota reached; calendar worker will retry after a 30-minute backoff: ' + message);
+    } else {
+      console.warn('Calendar synchronization deferred without failing the trigger: ' + message);
+    }
+  } finally {
+    if (lockHeld) lock.releaseLock();
+  }
   return { success: failed === 0, processed: processed, failed: failed, consumption: consumptionResult, reconciliationSkipped: reconciliationSkipped, message: 'Calendar, notification, and lesson-consumption background synchronization finished.' };
 }
 
