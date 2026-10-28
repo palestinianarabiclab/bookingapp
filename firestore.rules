@@ -80,24 +80,6 @@ service cloud.firestore {
         get(userDocPath(uid)).data.trialUsed == true;
     }
 
-    function reservationCount(data) {
-      return data.keys().hasAny(['reservedLessonCredits']) ? data.reservedLessonCredits : 0;
-    }
-
-    function lessonEntitlement(data, price) {
-      return data.keys().hasAny(['lessonCredits'])
-        ? data.lessonCredits + (
-            data.keys().hasAny(['totalPaid']) && data.keys().hasAny(['balance']) && price > 0 && data.balance > data.totalPaid
-              ? (data.balance - data.totalPaid) / price
-              : 0
-          )
-        : (data.keys().hasAny(['balance']) && price > 0 ? data.balance / price : 0);
-    }
-
-    function allowsOverdraft(data) {
-      return data.keys().hasAny(['allowOverdraft']) && data.allowOverdraft == true;
-    }
-
     match /users/{uid} {
       allow read: if ownsDoc(uid) || isTeacher();
       allow create: if ownsDoc(uid) &&
@@ -366,7 +348,7 @@ service cloud.firestore {
     }
 
     match /publicBookings/{docId} {
-      allow read: if true;
+      allow read: if signedIn();
 
       allow create: if signedIn() &&
         request.resource.data.keys().hasOnly([

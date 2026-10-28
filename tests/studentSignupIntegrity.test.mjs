@@ -77,11 +77,13 @@ test("student lessons modal moves focus before becoming aria-hidden", () => {
     assert.match(open, /modal\.querySelector\("\.modal__close"\)\?\.focus\(\)/);
 });
 
-test("active students combines registered and uniquely taught students", () => {
+test("active students uses the teacher's manual display count when configured", () => {
     const start = app.indexOf("function updateTeacherOverviewStats");
     const end = app.indexOf("function parseProfileCounter", start);
     const overview = app.slice(start, end);
-    assert.match(overview, /activeStudentsEl\.textContent = getActiveStudentCount\(\)\.toLocaleString\(\)/);
+    assert.match(overview, /studentsCountManual === true/);
+    assert.match(overview, /activeStudentsEl\.textContent = displayedStudentCount/);
+    assert.match(overview, /manualStudentCount \|\| getActiveStudentCount\(\)\.toLocaleString\(\)/);
     assert.doesNotMatch(overview, /Math\.max\(registeredCount, baseStudents/);
     assert.match(app, /knownStudentKeys/);
     assert.match(app, /knownPlatformStudentKeys/);

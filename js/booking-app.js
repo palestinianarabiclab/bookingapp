@@ -66,7 +66,7 @@ import {
 
 const DAY_KEYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const DEFAULT_TIMEZONE = "Africa/Cairo";
-const GOOGLE_BUSY_REFRESH_MS = 5 * 60 * 1000;
+const GOOGLE_BUSY_REFRESH_MS = 15 * 60 * 1000;
 const STUDENT_CHANGE_CUTOFF_MS = 12 * 60 * 60 * 1000;
 const BUSY_BLOCKS_CACHE_MS = 60000;
 const LESSON_FEEDBACK_BASELINE = {
@@ -137,6 +137,7 @@ const state = {
     preplyStatisticsSyncTimer: null,
     busyRefreshInFlight: null,
     googleCalendarModuleLoading: null,
+    pageHiddenAt: null,
     publicSettingsLoaded: false,
     bookingCalendarLoaded: false,
     publicSettingsInFlight: null,
@@ -1347,7 +1348,15 @@ async function refreshGoogleBusyAndCalendar({ silent = true } = {}) {
 function startGoogleBusyAutoRefresh() {
     if (state.busyRefreshTimer) return;
     state.busyRefreshTimer = window.setInterval(() => {
-        if (document.hidden) return;
+        if (document.hidden) {
+            if (!state.pageHiddenAt) state.pageHiddenAt = Date.now();
+            // Stop refreshing if page has been hidden for more than 10 minutes
+            if (Date.now() - state.pageHiddenAt > 10 * 60 * 1000) {
+                stopGoogleBusyAutoRefresh();
+            }
+            return;
+        }
+        state.pageHiddenAt = null;
         const studentScreen = document.getElementById("student-screen");
         if (!studentScreen?.classList.contains("app-screen--active")) return;
         ensureBookingCalendarLoaded({ force: true }).catch(console.error);
@@ -1421,7 +1430,14 @@ if (typeof window !== "undefined") {
         }
     });
     document.addEventListener("visibilitychange", () => {
-        if (!document.hidden && state.teacherRole === "teacher") refreshTeacherCalendarAutomatically({ force: true }).catch(console.error);
+        if (!document.hidden) {
+            state.pageHiddenAt = null;
+            if (state.teacherRole === "teacher") {
+                refreshTeacherCalendarAutomatically({ force: true }).catch(console.error);
+            } else if (!state.busyRefreshTimer) {
+                startGoogleBusyAutoRefresh();
+            }
+        }
     });
 }
 
@@ -5607,11 +5623,15 @@ function updateTeacherOverviewStats() {
         : (Array.isArray(state.bookingCache) ? state.bookingCache : []);
 
     const now = Date.now();
+    const manualStudentCount = state.profileSettings?.studentsCountManual === true
+        ? String(state.profileSettings?.studentsCount || "").trim()
+        : "";
+    const displayedStudentCount = manualStudentCount || getActiveStudentCount().toLocaleString();
 
     // Active students combines current accounts with unique taught students
     // retained by the existing Preply/platform synchronization history.
     if (activeStudentsEl) {
-        activeStudentsEl.textContent = getActiveStudentCount().toLocaleString();
+        activeStudentsEl.textContent = displayedStudentCount;
     }
 
     // 2. Calculate Upcoming Bookings
@@ -5656,9 +5676,7 @@ function updateTeacherOverviewStats() {
         headTotalBalanceEl.textContent = formattedTotalBalance;
     }
     if (headTotalStudentsEl) {
-        const manualCount = state.profileSettings?.studentsCountManual === true
-            ? String(state.profileSettings?.studentsCount || "").trim() : "";
-        headTotalStudentsEl.textContent = manualCount || String(studentList.length || 0);
+        headTotalStudentsEl.textContent = manualStudentCount || String(studentList.length || 0);
     }
 
     renderTeacherUpcomingLessonBanner();
@@ -9332,7 +9350,6 @@ async function init() {
     window.addEventListener("resize", syncResponsiveWelcomeLayout);
     initializeStudentTimezoneSelector();
     buildTeacherScheduleUi();
-    renderProfileUi();
     renderReviewsUi();
     updateStudentOfferUi();
     loadPublicLessonFeedbackSummary().catch(console.error);
@@ -9348,7 +9365,6 @@ async function init() {
         return;
     }
 
-    startPublicProfileListener();
     loadPublicSettings({ force: true }).catch((error) => {
         console.warn("Could not load public lesson packages.", error);
         updateStudentOfferUi();
@@ -9358,27 +9374,28 @@ async function init() {
         els.teacherLoginModal?.classList.add("modal--open");
     }
 
-    loadCloudProfileSettings(window.db, createInitialProfileSettings()).then((cloudProf) => {
-        if (cloudProf) {
-            // Automatically migrate to new Palestinian Arabic bio if empty, using old template, or mentioning MSA
-            if (!cloudProf.bioText || 
-                cloudProf.bioText.includes("Modern Standard Arabic (MSA)") || 
-                cloudProf.bioText.includes("Hello and welcome! I am Farouq") ||
-                cloudProf.quoteArabic?.includes("Welcome! I am Farouq")) {
-                const updatedDefault = createInitialProfileSettings();
-                cloudProf = {
-                    ...cloudProf,
-                    bioText: updatedDefault.bioText,
-                    quoteArabic: updatedDefault.quoteArabic,
-                    headline: updatedDefault.headline
-                };
-                saveCloudProfileSettings(window.db, cloudProf).catch(console.error);
-            }
-            state.profileSettings = cloudProf;
-            saveLocalProfileSettings("teacher_profile_v1", cloudProf);
-            renderProfileUi();
+    const cloudProf = await loadCloudProfileSettings(window.db, createInitialProfileSettings());
+    if (cloudProf) {
+        // Automatically migrate to new Palestinian Arabic bio if empty, using old template, or mentioning MSA
+        if (!cloudProf.bioText || 
+            cloudProf.bioText.includes("Modern Standard Arabic (MSA)") || 
+            cloudProf.bioText.includes("Hello and welcome! I am Farouq") ||
+            cloudProf.quoteArabic?.includes("Welcome! I am Farouq")) {
+            const updatedDefault = createInitialProfileSettings();
+            cloudProf = {
+                ...cloudProf,
+                bioText: updatedDefault.bioText,
+                quoteArabic: updatedDefault.quoteArabic,
+                headline: updatedDefault.headline
+            };
+            await saveCloudProfileSettings(window.db, cloudProf).catch(console.error);
         }
-    }).catch(console.error);
+        state.profileSettings = cloudProf;
+        saveLocalProfileSettings("teacher_profile_v1", cloudProf);
+        renderProfileUi();
+    }
+
+    startPublicProfileListener();
 
     loadCloudReviews(window.db).then(async (cloudRevs) => {
         const initialRevs = createInitialReviews();

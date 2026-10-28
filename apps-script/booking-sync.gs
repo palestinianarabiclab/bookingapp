@@ -1271,17 +1271,21 @@ function cancelExternalBookingAdmin_(config, bookingId, studentUid) {
   }
 }
 
-function firestorePatchAdmin_(config, documentPath, values) {
+function firestorePatchAdmin_(config, documentPath, values, currentUpdateTime) {
   const fields = {};
   const masks = [];
   Object.keys(values).forEach(function (key) {
     fields[key] = firestoreValue_(values[key]);
     masks.push('updateMask.fieldPaths=' + encodeURIComponent(key));
   });
+  const payload = { fields: fields };
+  if (currentUpdateTime) {
+    payload.currentDocument = { updateTime: currentUpdateTime };
+  }
   return firestoreAdminFetch_(config, '/' + documentPath + '?' + masks.join('&'), {
     method: 'patch',
     contentType: 'application/json',
-    payload: JSON.stringify({ fields: fields }),
+    payload: JSON.stringify(payload),
   });
 }
 
@@ -1539,7 +1543,6 @@ function getSlotClaimIds_(slot, durationMinutes) {
 }
 
 function patchCalendarSyncResult_(config, bookingId, values) {
-  values.calendarLastCheckedAt = Date.now();
   firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), values);
 }
 
@@ -1551,7 +1554,7 @@ function isFirestoreQuotaError_(error) {
     message.indexOf('quota exceeded') !== -1;
 }
 
-function ensureCalendarEventForFirestoreBooking_(config, doc) {
+function ensureCalendarEventForFirestoreBooking_(config, doc, syncAttempts) {
   const bookingId = firestoreDocId_(doc);
   const slot = fsNumber_(doc, 'slot');
   const durationMinutes = Math.max(15, fsNumber_(doc, 'durationMinutes') || 50);
@@ -1571,17 +1574,20 @@ function ensureCalendarEventForFirestoreBooking_(config, doc) {
   if (!meeting.meetingUrl) meeting = ensureBookingMeetingLink_(config, bookingId, slot);
   patchCalendarSyncResult_(config, bookingId, {
     calendarSynced: true, calendarSyncState: 'synced', calendarSyncLastError: '',
-    calendarLastSyncedAt: Date.now(), googleCalendarEventId: meeting.eventId || event.getId(), meetingUrl: meeting.meetingUrl || '',
+    calendarLastCheckedAt: Date.now(), calendarLastSyncedAt: Date.now(),
+    googleCalendarEventId: meeting.eventId || event.getId(), meetingUrl: meeting.meetingUrl || '',
+    calendarSyncAttempts: Number.isFinite(syncAttempts) ? syncAttempts : 0,
+    calendarNextRetryAt: 0
   });
   firestorePatchAdmin_(config, 'publicBookings/' + encodeURIComponent(bookingId), { calendarSynced: true, updatedAt: Date.now() });
 }
 
-function deleteCalendarEventForFirestoreBooking_(config, doc) {
+function deleteCalendarEventForFirestoreBooking_(config, doc, syncAttempts) {
   const bookingId = firestoreDocId_(doc);
   const cal = CalendarApp.getCalendarById(config.primaryCalendarId);
   const event = cal && findBookingEvent_(cal, fsString_(doc, 'googleCalendarEventId'), bookingId, fsNumber_(doc, 'slot'));
   if (event) event.deleteEvent();
-  patchCalendarSyncResult_(config, bookingId, { calendarDeletePending: false, calendarSyncState: 'synced', calendarSyncLastError: '', calendarLastSyncedAt: Date.now() });
+  patchCalendarSyncResult_(config, bookingId, { calendarDeletePending: false, calendarSyncState: 'synced', calendarSyncLastError: '', calendarLastCheckedAt: Date.now(), calendarLastSyncedAt: Date.now(), calendarSyncAttempts: Number.isFinite(syncAttempts) ? syncAttempts : 0, calendarNextRetryAt: 0 });
 }
 
 function reconcilePlatformCalendarEvents_(config) {
@@ -1606,6 +1612,7 @@ function reconcilePlatformCalendarEvents_(config) {
     const event = matches[0];
     let doc;
     try { doc = firestoreAdminFetch_(config, '/bookings/' + encodeURIComponent(bookingId), { method: 'get' }); } catch (err) { return; }
+    if (fsNumber_(doc, 'calendarNextRetryAt') > now) return;
     const oldSlot = fsNumber_(doc, 'slot');
     const oldDuration = fsNumber_(doc, 'durationMinutes') || 50;
     const newSlot = event.getStartTime().getTime();
@@ -1617,7 +1624,7 @@ function reconcilePlatformCalendarEvents_(config) {
     if (!changed && matches.length > 1 && fsString_(doc, 'calendarSyncState') === 'failed' &&
         /duplicate calendar events/i.test(fsString_(doc, 'calendarSyncLastError'))) return;
     const values = {
-      calendarLastCheckedAt: Date.now(), googleCalendarEventId: event.getId(),
+      googleCalendarEventId: event.getId(),
       calendarSyncState: matches.length > 1 ? 'failed' : (changed ? 'externally-modified' : 'synced'),
       calendarSyncLastError: matches.length > 1 ? 'Duplicate Calendar events detected for this Booking ID.' : '',
     };
@@ -1631,7 +1638,7 @@ function reconcilePlatformCalendarEvents_(config) {
       if (conflictingClaim) {
         event.setTime(new Date(oldSlot), new Date(oldSlot + oldDuration * 60000));
         firestorePatchAdmin_(config, 'bookings/' + encodeURIComponent(bookingId), {
-          calendarSyncState: 'conflict', calendarSyncLastError: 'Direct Calendar move overlaps another platform booking.', calendarLastCheckedAt: Date.now()
+          calendarSyncState: 'conflict', calendarSyncLastError: 'Direct Calendar move overlaps another platform booking.'
         });
         return;
       }
@@ -1658,7 +1665,7 @@ function reconcilePlatformCalendarEvents_(config) {
     queryBookingsAdmin_(config, [
       { field: 'slot', op: 'GREATER_THAN_OR_EQUAL', value: windowStart },
       { field: 'slot', op: 'LESS_THAN', value: Math.min(reconciliationEnd, windowStart + reconciliationWindow) }
-    ], 500).forEach(function (bookingDoc) { syncedBookingMap[firestoreDocId_(bookingDoc)] = bookingDoc; });
+    ], 100).forEach(function (bookingDoc) { syncedBookingMap[firestoreDocId_(bookingDoc)] = bookingDoc; });
   }
   const syncedBookings = Object.keys(syncedBookingMap).map(function (id) { return syncedBookingMap[id]; });
   syncedBookings.forEach(function (doc) {
@@ -1677,6 +1684,9 @@ function reconcilePlatformCalendarEvents_(config) {
   return byBookingId;
 }
 
+const MAX_CALENDAR_SYNC_ATTEMPTS = 5;
+const MAX_CALENDAR_SYNC_EXECUTION_MS = 5 * 60 * 1000;
+
 function processCalendarSynchronization() {
   const config = getConfig_();
   const lock = LockService.getScriptLock();
@@ -1685,6 +1695,8 @@ function processCalendarSynchronization() {
   let failed = 0;
   let consumptionResult = { consumed: 0, skipped: 0, failed: 0, checked: 0 };
   let reconciliationSkipped = false;
+  const startTime = Date.now();
+  function timeBudgetExceeded() { return Date.now() - startTime > MAX_CALENDAR_SYNC_EXECUTION_MS; }
   try {
     lock.waitLock(20000);
     lockHeld = true;
@@ -1699,17 +1711,34 @@ function processCalendarSynchronization() {
     }
     const pendingCreates = queryBookingsAdmin_(config, [{ field: 'calendarSynced', value: false }], 10);
     pendingCreates.forEach(function (doc) {
+      if (timeBudgetExceeded()) return;
       ensureLegacyPendingNotificationJobs_(config, doc);
       const bookingId = firestoreDocId_(doc);
-      if (fsString_(doc, 'calendarSyncState') === 'externally-deleted' || fsNumber_(doc, 'calendarNextRetryAt') > Date.now()) return;
-      const attempts = fsNumber_(doc, 'calendarSyncAttempts') + 1;
+      const currentAttempts = fsNumber_(doc, 'calendarSyncAttempts') || 0;
+      if (fsString_(doc, 'calendarSyncState') === 'externally-deleted') return;
+      if (currentAttempts >= MAX_CALENDAR_SYNC_ATTEMPTS) {
+        patchCalendarSyncResult_(config, bookingId, {
+          calendarSyncState: 'requires-review',
+          calendarSyncLastError: 'Maximum calendar sync attempts reached (' + MAX_CALENDAR_SYNC_ATTEMPTS + '). Manual review required.',
+          calendarNextRetryAt: Date.now() + 7 * 24 * 60 * 60 * 1000
+        });
+        return;
+      }
+      if (fsNumber_(doc, 'calendarNextRetryAt') > Date.now()) return;
+      const attempts = currentAttempts + 1;
       try {
-        if (fsString_(doc, 'status') === 'canceled' || fsBool_(doc, 'calendarDeletePending')) deleteCalendarEventForFirestoreBooking_(config, doc);
-        else ensureCalendarEventForFirestoreBooking_(config, doc);
-        patchCalendarSyncResult_(config, bookingId, { calendarSyncAttempts: attempts, calendarNextRetryAt: 0 });
+        if (fsString_(doc, 'status') === 'canceled' || fsBool_(doc, 'calendarDeletePending')) {
+          deleteCalendarEventForFirestoreBooking_(config, doc, attempts);
+        } else {
+          ensureCalendarEventForFirestoreBooking_(config, doc, attempts);
+        }
         processed += 1;
       } catch (err) {
-        patchCalendarSyncResult_(config, bookingId, { calendarSyncState: 'failed', calendarSyncAttempts: attempts, calendarSyncLastError: String(err && err.message || err), calendarNextRetryAt: Date.now() + Math.min(6 * 60 * 60 * 1000, Math.pow(2, Math.min(attempts, 8)) * 60000) });
+        patchCalendarSyncResult_(config, bookingId, {
+          calendarSyncState: 'failed', calendarSyncAttempts: attempts,
+          calendarSyncLastError: String(err && err.message || err),
+          calendarNextRetryAt: Date.now() + Math.min(6 * 60 * 60 * 1000, Math.pow(2, Math.min(attempts, 8)) * 60000)
+        });
         failed += 1;
       }
     });
@@ -1720,34 +1749,36 @@ function processCalendarSynchronization() {
     const properties = PropertiesService.getScriptProperties();
     const now = Date.now();
     const lastReconciliation = Number(properties.getProperty('CALENDAR_RECONCILE_LAST_RUN_AT') || 0);
-    if (now - lastReconciliation >= 60 * 60 * 1000) {
+    if (now - lastReconciliation >= 60 * 60 * 1000 && !timeBudgetExceeded()) {
       try {
         reconcilePlatformCalendarEvents_(config);
         properties.setProperty('CALENDAR_RECONCILE_LAST_RUN_AT', String(now));
       } catch (err) {
         failed += 1;
-        // Record a backoff timestamp so quota errors cannot trigger the same
-        // expensive scan every ten minutes or generate repeated failure email.
         properties.setProperty('CALENDAR_RECONCILE_LAST_RUN_AT', String(now));
         console.warn('Calendar reconciliation deferred: ' + String(err && err.message || err));
       }
     } else {
       reconciliationSkipped = true;
     }
-    try {
-      consumptionResult = processDueLessonConsumption_(config);
-    } catch (err) {
-      failed += 1;
-      console.warn('Lesson consumption deferred: ' + String(err && err.message || err));
+    if (!timeBudgetExceeded()) {
+      try {
+        consumptionResult = processDueLessonConsumption_(config);
+      } catch (err) {
+        failed += 1;
+        console.warn('Lesson consumption deferred: ' + String(err && err.message || err));
+      }
+      processed += consumptionResult.consumed;
+      failed += consumptionResult.failed;
     }
-    processed += consumptionResult.consumed;
-    failed += consumptionResult.failed;
-    try {
-      const notificationResult = processPendingNotificationJobs_(config, '');
-      processed += notificationResult.processed;
-    } catch (err) {
-      failed += 1;
-      console.warn('Notification processing deferred: ' + String(err && err.message || err));
+    if (!timeBudgetExceeded()) {
+      try {
+        const notificationResult = processPendingNotificationJobs_(config, '');
+        processed += notificationResult.processed;
+      } catch (err) {
+        failed += 1;
+        console.warn('Notification processing deferred: ' + String(err && err.message || err));
+      }
     }
     workerProperties.deleteProperty('CALENDAR_SYNC_WRITE_BACKOFF_UNTIL');
   } catch (err) {
