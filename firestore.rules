@@ -662,7 +662,11 @@ service cloud.firestore {
             'calendarSynced',
             'googleCalendarEventId',
             'meetingUrl',
-            'history'
+            'history',
+            'teacherNotificationStatus',
+            'teacherNotificationLastError',
+            'studentNotificationStatus',
+            'studentNotificationLastError'
           ]) &&
           hasValidMeetingLink(request.resource.data)
       ) || (
