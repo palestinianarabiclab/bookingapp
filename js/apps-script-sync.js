@@ -100,7 +100,7 @@ async function getAppsScriptWebAppUrl() {
 }
 
 async function callAppsScript(action, payload = {}, { allowGet = false } = {}) {
-    const firestoreDependent = !["test", "getBusy", "getTeacherBusy", "getEmailQuota"].includes(action);
+    const firestoreDependent = !["test", "getBusy", "getTeacherBusy", "getEmailQuota", "notifyNewStudentSignup"].includes(action);
     if (firestoreDependent && Date.now() < getFirestoreQuotaCooldownUntil()) {
         return { success: false, quotaLimited: true, message: "Firestore quota is temporarily exhausted. Automatic retries are paused for five minutes." };
     }
@@ -202,8 +202,8 @@ async function sendReviewRequestViaAppsScript({ studentId, siteUrl } = {}) {
     return callAppsScript("sendReviewRequest", { studentId, siteUrl });
 }
 
-async function notifyNewStudentSignupViaAppsScript({ studentId } = {}) {
-    return callAppsScript("notifyNewStudentSignup", { studentId });
+async function notifyNewStudentSignupViaAppsScript({ studentId, name = "", email = "", phone = "" } = {}) {
+    return callAppsScript("notifyNewStudentSignup", { studentId, name, email, phone });
 }
 
 async function sendStudentBookingInvitationViaAppsScript({ studentId, template = "book-more" } = {}) {

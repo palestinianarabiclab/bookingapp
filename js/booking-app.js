@@ -339,6 +339,7 @@ function cacheDom() {
         "teacherProfileVideoUrlInput",
         "teacherProfileHoursInput",
         "teacherProfileStudentsInput",
+        "teacherProfileStudentsAutoToggle",
         "teacherProfileQuoteInput",
         "teacherProfileBioInput",
         "saveTeacherProfileBtn",
@@ -1141,6 +1142,32 @@ function stopStudentProfileListener() {
     state.studentEntitlementUnsubscribe = null;
 }
 
+let signupNotificationAttemptedUid = "";
+
+function maybeNotifyPendingStudentSignup(uid, userData = {}) {
+    if (!uid || signupNotificationAttemptedUid === uid) return;
+    if ((userData.role || "student") !== "student") return;
+    if (Number(userData.teacherSignupNotificationSentAt || 0) > 0) return;
+    const rawCreatedAt = userData.createdAt;
+    const createdAtMs = typeof rawCreatedAt?.toMillis === "function"
+        ? rawCreatedAt.toMillis()
+        : Number(rawCreatedAt || 0);
+    if (!createdAtMs || (Date.now() - createdAtMs) > 24 * 60 * 60 * 1000) return;
+    signupNotificationAttemptedUid = uid;
+    window.notifyNewStudentSignupViaAppsScript?.({
+        studentId: uid,
+        name: String(userData.name || "").trim(),
+        email: String(userData.email || state.currentUser?.email || "").trim(),
+        phone: String(userData.phone || "").trim(),
+    }).then((result) => {
+        if (result && result.success === false) {
+            console.warn("Teacher signup notification retry was not sent:", result.message);
+        }
+    }).catch((error) => {
+        console.warn("Teacher signup notification retry failed:", error);
+    });
+}
+
 function startStudentProfileListener() {
     stopStudentProfileListener();
     if (!window.db || !state.currentUser || state.currentRole !== "student") return;
@@ -1151,6 +1178,7 @@ function startStudentProfileListener() {
             if (!snap.exists) return;
             state.studentProfile = snap.data() || {};
             updateStudentAuthUi();
+            maybeNotifyPendingStudentSignup(state.currentUser?.uid, state.studentProfile);
         }, (error) => {
             console.warn("Could not watch student profile.", error);
         });
@@ -4179,11 +4207,23 @@ function wireStudentActions() {
                     allowOverdraft: false, pricingVersion: "unconfigured", entitlementUpdatedAt: Date.now(),
                 });
                 await signupBatch.commit();
-                window.notifyNewStudentSignupViaAppsScript?.({ studentId: cred.user.uid })
-                    .then((result) => {
-                        if (result && result.success === false) console.warn("Teacher signup notification was not sent:", result.message);
-                    })
-                    .catch((error) => console.warn("Teacher signup notification failed:", error));
+                signupNotificationAttemptedUid = cred.user.uid;
+                const signupNotifyPromise = window.notifyNewStudentSignupViaAppsScript?.({
+                    studentId: cred.user.uid,
+                    name,
+                    email,
+                    phone,
+                });
+                if (signupNotifyPromise && typeof signupNotifyPromise.then === "function") {
+                    await Promise.race([
+                        signupNotifyPromise.then((result) => {
+                            if (result && result.success === false) {
+                                console.warn("Teacher signup notification was not sent:", result.message);
+                            }
+                        }),
+                        new Promise((resolve) => window.setTimeout(resolve, 4000)),
+                    ]).catch((error) => console.warn("Teacher signup notification failed:", error));
+                }
                 setStatus(els.studentAuthMsg, "Account created. You can book now.", "success");
                 els.studentAuthModal?.classList.remove("modal--open");
                 showScreen("student-screen");
@@ -6475,7 +6515,15 @@ function renderProfileUi() {
     if (els.teacherProfileAvatarUrlInput) els.teacherProfileAvatarUrlInput.value = p.avatarUrl || "";
     if (els.teacherProfileVideoUrlInput) els.teacherProfileVideoUrlInput.value = p.videoUrl || "";
     if (els.teacherProfileHoursInput) els.teacherProfileHoursInput.value = p.hoursTaught || "";
-    if (els.teacherProfileStudentsInput) els.teacherProfileStudentsInput.value = p.studentsCount || "";
+    const isManualStudents = p.studentsCountManual === true;
+    if (els.teacherProfileStudentsAutoToggle) {
+        els.teacherProfileStudentsAutoToggle.checked = !isManualStudents;
+    }
+    if (els.teacherProfileStudentsInput) {
+        const autoCount = p.activeStudentsCount ?? (Array.isArray(state.studentsCache) && state.studentsCache.length ? String(getActiveStudentCount()) : (p.studentsCount || ""));
+        els.teacherProfileStudentsInput.value = isManualStudents ? (p.studentsCount || "") : String(autoCount);
+        els.teacherProfileStudentsInput.disabled = !isManualStudents;
+    }
     if (els.teacherProfileQuoteInput) els.teacherProfileQuoteInput.value = p.quoteArabic || "";
     if (els.teacherProfileBioInput) els.teacherProfileBioInput.value = p.bioText || "";
     updateStudentOfferUi();
@@ -7876,6 +7924,18 @@ function wireTeacherActions() {
         await withButtonLoading(els.teacherLogoutBtn, "Signing out...", () => window.auth.signOut());
     });
 
+    els.teacherProfileStudentsAutoToggle?.addEventListener("change", () => {
+        const auto = els.teacherProfileStudentsAutoToggle.checked;
+        if (els.teacherProfileStudentsInput) {
+            els.teacherProfileStudentsInput.disabled = auto;
+            if (auto) {
+                els.teacherProfileStudentsInput.value = String(getActiveStudentCount());
+            } else {
+                els.teacherProfileStudentsInput.focus();
+            }
+        }
+    });
+
     els.teacherProfileForm?.addEventListener("submit", async (event) => {
         event.preventDefault();
         try {
@@ -7884,6 +7944,12 @@ function wireTeacherActions() {
                 const defaultPriceText = rateDisplay.replace(/,/g, "").match(/\d+(?:\.\d+)?/);
                 const defaultPrice = validPrice(defaultPriceText?.[0]);
                 if (!defaultPrice) throw new Error("Enter a valid global default lesson price.");
+                const manualInput = (els.teacherProfileStudentsInput?.value || "").trim();
+                const useAutoStudents = els.teacherProfileStudentsAutoToggle
+                    ? els.teacherProfileStudentsAutoToggle.checked || !manualInput
+                    : !manualInput;
+                const autoActiveCount = String(getActiveStudentCount());
+                const autoRegisteredCount = String(Array.isArray(state.studentsCache) ? state.studentsCache.length : 0);
                 const updated = {
                     ...state.profileSettings,
                     name: (els.teacherProfileNameInput?.value || "").trim() || "Farouq Murtaja",
@@ -7892,8 +7958,10 @@ function wireTeacherActions() {
                     avatarUrl: (els.teacherProfileAvatarUrlInput?.value || "").trim(),
                     videoUrl: (els.teacherProfileVideoUrlInput?.value || "").trim(),
                     hoursTaught: (els.teacherProfileHoursInput?.value || "").trim() || "1,200+",
-                    studentsCount: (els.teacherProfileStudentsInput?.value || "").trim() || state.profileSettings?.studentsCount || "85+",
-                    studentsCountManual: true,
+                    studentsCount: useAutoStudents ? autoActiveCount : manualInput,
+                    studentsCountManual: !useAutoStudents,
+                    activeStudentsCount: autoActiveCount,
+                    registeredStudentsCount: autoRegisteredCount,
                     quoteArabic: (els.teacherProfileQuoteInput?.value || "").trim(),
                     bioText: (els.teacherProfileBioInput?.value || "").trim(),
                 };

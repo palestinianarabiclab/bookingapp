@@ -367,7 +367,7 @@ service cloud.firestore {
         (
           (
             request.resource.data.source == "student" &&
-            request.resource.data.slot >= request.time.toMillis() + 6 * 60 * 60 * 1000 &&
+            request.resource.data.slot >= request.time.toMillis() + 30 * 60 * 1000 &&
             getAfter(/databases/$(database)/documents/bookings/$(docId)).data.studentUid == request.auth.uid
           ) ||
           (
@@ -523,7 +523,7 @@ service cloud.firestore {
         (
           (
             request.resource.data.source == "student" &&
-            request.resource.data.slot >= request.time.toMillis() + 6 * 60 * 60 * 1000 &&
+            request.resource.data.slot >= request.time.toMillis() + 30 * 60 * 1000 &&
             request.resource.data.studentUid == request.auth.uid &&
             request.resource.data.email == request.auth.token.email
           ) ||
