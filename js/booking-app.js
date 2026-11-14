@@ -7159,6 +7159,31 @@ async function rotateFuturePricingVersions(defaultPrice) {
     }
 }
 
+function getStudentRegisteredAtMs(student = {}) {
+    const raw = student?.registeredAt ?? student?.createdAt;
+    if (!raw) return 0;
+    if (typeof raw?.toMillis === "function") return raw.toMillis();
+    if (typeof raw?.toDate === "function") return raw.toDate().getTime();
+    if (typeof raw === "object" && Number.isFinite(Number(raw.seconds))) {
+        return Number(raw.seconds) * 1000;
+    }
+    if (typeof raw === "number" && Number.isFinite(raw)) {
+        return raw < 1e11 ? raw * 1000 : raw;
+    }
+    const parsed = Date.parse(String(raw));
+    return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function formatStudentRegistrationDate(student = {}, { includeTime = false } = {}) {
+    const ms = getStudentRegisteredAtMs(student);
+    if (!ms) return "Date not recorded";
+    const date = new Date(ms);
+    if (Number.isNaN(date.getTime())) return "Date not recorded";
+    return date.toLocaleString("en-US", includeTime
+        ? { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }
+        : { year: "numeric", month: "short", day: "numeric" });
+}
+
 async function refreshTeacherStudents() {
     if (!els.teacherStudentsList) return;
     els.teacherStudentsList.innerHTML = "<div class=\"small-note\">Loading students...</div>";
@@ -7177,8 +7202,23 @@ async function refreshTeacherStudents() {
         const migratedCount = await migrateLegacyStudentFinancialData(snap, accounting, entitlements);
         if (migratedCount > 0) return refreshTeacherStudents();
         const students = [];
-        snap.forEach((doc) => students.push({ id: doc.id, ...(doc.data() || {}), ...(entitlements.get(doc.id) || {}), ...(accounting.get(doc.id) || {}) }));
-        students.sort((a, b) => String(a.name || a.email || "").localeCompare(String(b.name || b.email || "")));
+        snap.forEach((doc) => {
+            const userData = doc.data() || {};
+            const entData = entitlements.get(doc.id) || {};
+            const accData = accounting.get(doc.id) || {};
+            students.push({
+                id: doc.id,
+                ...userData,
+                ...entData,
+                ...accData,
+                registeredAt: userData.createdAt ?? entData.createdAt ?? accData.createdAt ?? null,
+            });
+        });
+        students.sort((a, b) => {
+            const timeDiff = getStudentRegisteredAtMs(b) - getStudentRegisteredAtMs(a);
+            if (timeDiff !== 0) return timeDiff;
+            return String(a.name || a.email || "").localeCompare(String(b.name || b.email || ""));
+        });
         state.studentsCache = students;
         await syncPublicStudentCounts(students).catch((error) => console.warn("Could not update the public student counts.", error));
         updateTeacherOverviewStats();
@@ -7212,13 +7252,18 @@ async function refreshTeacherStudents() {
                     ? "Review requested"
                     : "Review not requested";
             const trialUsed = student.trialUsed === true;
+            const registeredFull = formatStudentRegistrationDate(student, { includeTime: true });
 
             return `
                 <div class="student-admin-item" data-student-id="${escapeHtml(student.id)}">
                     <button class="student-admin-item__summary" type="button" data-student-action="toggle">
                         <span class="student-admin-item__identity">
                             <span class="student-admin-item__avatar">${escapeHtml(String(student.name || student.email || "S").slice(0, 1).toUpperCase())}</span>
-                            <span><strong>${escapeHtml(student.name || "Student")}</strong><span>${escapeHtml(student.email || "")}</span></span>
+                            <span>
+                                <strong>${escapeHtml(student.name || "Student")}</strong>
+                                <span>${escapeHtml(student.email || "")}</span>
+                                <span class="student-admin-item__joined">📅 Joined: ${escapeHtml(registeredFull)}</span>
+                            </span>
                         </span>
                         <span class="student-admin-metrics">
                             <span class="student-admin-metric"><small>Available</small><strong>${availableLessons}</strong></span>
@@ -7230,7 +7275,7 @@ async function refreshTeacherStudents() {
                     </button>
                     <form class="student-admin-editor" data-student-editor hidden>
                         <div class="student-admin-editor__head">
-                            <div><strong>Student account</strong><span>${escapeHtml(student.phone || "No phone number")}</span></div>
+                            <div><strong>Student account</strong><span>${escapeHtml(student.phone || "No phone number")} · 📅 Registered: ${escapeHtml(registeredFull)}</span></div>
                             <div class="student-admin-editor__actions">
                                 <button class="btn btn--outline btn--small" type="button" data-student-action="send-booking-invitation" data-student-id="${escapeHtml(student.id)}">Send Lesson Invitation</button>
                                 <button class="btn btn--outline btn--small" type="button" data-student-action="view-lessons" data-student-id="${escapeHtml(student.id)}">View Lessons & deductions</button>
