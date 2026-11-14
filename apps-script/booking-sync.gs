@@ -1,3 +1,16 @@
+function authorizeAppsScript() {
+  const config = getConfig_();
+  const cal = CalendarApp.getCalendarById(config.primaryCalendarId);
+  const quota = MailApp.getRemainingDailyQuota();
+  const token = ScriptApp.getOAuthToken();
+  Logger.log('Authorized successfully. Calendar: ' + (cal ? cal.getName() : 'none') + ', Email quota: ' + quota + ', Token length: ' + (token ? token.length : 0));
+  return {
+    authorized: true,
+    calendarFound: !!cal,
+    emailQuotaRemaining: quota,
+  };
+}
+
 function jsonOut(obj) {
   return ContentService
     .createTextOutput(JSON.stringify(obj))
