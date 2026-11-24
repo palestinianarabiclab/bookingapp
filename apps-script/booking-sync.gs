@@ -90,7 +90,7 @@ function getConfig_() {
     additionalCalendarIds: parseCalendarIds_(additionalRaw),
     defaultTimeZone: getScriptProperty_(props, 'DEFAULT_TIMEZONE', '') || Session.getScriptTimeZone() || 'Africa/Cairo',
     notificationEmail: notificationEmail,
-    siteUrl: getScriptProperty_(props, 'SITE_URL', 'https://palestinianarabiclab.vercel.app/'),
+    siteUrl: getScriptProperty_(props, 'SITE_URL', 'https://bookingapp-tawny.vercel.app/'),
     teacherName: getScriptProperty_(props, 'TEACHER_NAME', 'Farouq'),
   };
 }

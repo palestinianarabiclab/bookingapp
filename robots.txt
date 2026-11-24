@@ -7,4 +7,13 @@ Allow: /
 User-agent: GPTBot
 Allow: /
 
-Sitemap: https://palestinianarabiclab.vercel.app/sitemap.xml
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: anthropic-ai
+Allow: /
+
+Sitemap: https://bookingapp-tawny.vercel.app/sitemap.xml
