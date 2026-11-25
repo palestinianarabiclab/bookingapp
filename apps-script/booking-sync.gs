@@ -81,7 +81,7 @@ function getConfig_() {
     firebaseTeacherEmail
   );
   return {
-    firebaseApiKey: getScriptProperty_(props, 'FIREBASE_API_KEY', 'AIzaSyCfhVE4hdR5P7YW6JOAnSC5az7s-J8zEsc'),
+    firebaseApiKey: getScriptProperty_(props, 'FIREBASE_API_KEY', 'AIzaSyB0TR0uOS7-cOAQxtSUYpY2ikvqwDsy2YM'),
     firebaseProjectId: getScriptProperty_(props, 'FIREBASE_PROJECT_ID', 'farouqapp-7ea93'),
     firebaseTeacherEmail: firebaseTeacherEmail,
     firebaseTeacherEmails: firebaseTeacherEmails,
