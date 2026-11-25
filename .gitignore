@@ -1,5 +1,9 @@
 # Generated deployment output
 public/
+node_modules/
+.agents/
+.vscode/
+.vercel/
 .env
 .env.*
 !.env.example
